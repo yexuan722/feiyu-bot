@@ -1,6 +1,9 @@
 # 真实配置里有 Cookie 和 API Key，永远别提交
 config.json
-config.*.json
+config.local.json
+config.test.json
+# 但模板要进仓库，不然别人 clone 下来没东西可抄
+!config.example.json
 data/
 debug/
 __pycache__/

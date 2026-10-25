@@ -1,0 +1,80 @@
+{
+  "bili": {
+    "sessdata": "",
+    "bili_jct": "",
+    "buvid3": "",
+    "dedeuserid": "",
+    "timeout": 20
+  },
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-flash",
+    "temperature": 0.9,
+    "max_tokens": 400,
+    "timeout": 60,
+    "extra_body": { "thinking": { "type": "disabled" } }
+  },
+  "mode": {
+    "auto_send": false,
+    "poll_seconds": 180,
+    "allow_top_level_reply": false,
+    "first_run_window_minutes": 120
+  },
+  "limits": {
+    "max_per_hour": 6,
+    "max_per_day": 30,
+    "min_gap_seconds": 60,
+    "max_reply_chars": 80
+  },
+  "dm": {
+    "enabled": true,
+    "auto_reply": false,
+    "poll_seconds": 300,
+    "max_sessions_per_round": 6,
+    "max_per_hour": 5,
+    "min_gap_seconds": 30,
+    "max_reply_chars": 120,
+    "allowed_uids": [],
+    "blocked_uids": []
+  },
+  "discover": {
+    "mode": "daily",
+    "daily_at": "09:00",
+    "daily_count": 10,
+    "interval_minutes": 180,
+    "min_score": 6,
+    "min_duration_seconds": 60,
+    "max_duration_seconds": 3600,
+    "block_keywords": ["广告", "抽奖", "推广", "带货", "直播回放"],
+    "tag_weight_scale": 0.5,
+    "tag_bonus_max": 1.5,
+    "randomness": 1.2,
+    "tag_fetch_limit": 30
+  },
+  "interests": [
+    "游戏实况",
+    "独立游戏",
+    "硬核科普",
+    "美食",
+    "鬼畜",
+    "编程/技术",
+    "动画杂谈"
+  ],
+  "notify": {
+    "webhook_enabled": false,
+    "webhook_url": "",
+    "webhook_type": "json_text",
+    "chat_id": "",
+    "dm_enabled": false,
+    "dm_to_uid": ""
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765
+  },
+  "watchdog": {
+    "interval_seconds": 180
+  },
+  "persona_file": "bbot/persona.md"
+}
