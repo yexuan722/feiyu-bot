@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
-"""发现链：热门 + 首页推荐 → 去重过滤 → 打分 → 投喂。
+"""发现链：热门 + 首页推荐 → 去重过滤 → 打分 → 按口味加权 → 每天挑固定条数。
 
-有模型就让模型打分（能读懂「好玩」），没模型就用关键词兜底（能跑，但笨）。
+每天一批（默认 10 条），带上 tag。你在面板上点感兴趣的 tag，那个 tag 下次加分，
+但加分有上限，还掺了随机抖动——不会变成回音壁。
 """
 
 from __future__ import annotations
+
+import random
+from datetime import datetime
 
 from . import llm
 from .api import BiliClient, BiliError
@@ -35,7 +39,6 @@ def _heuristic_score(video: dict, interests: list[str], block: list[str]) -> tup
 
 def _llm_score(cfg: dict, videos: list[dict], interests: list[str],
                block: list[str]) -> dict[int, tuple[int, str]]:
-    """分批让模型打分。返回 {下标: (分数, 理由)}。"""
     out: dict[int, tuple[int, str]] = {}
     interests_text = "、".join(interests) if interests else "（用户没填，按大众口味）"
     for start in range(0, len(videos), 15):
@@ -103,6 +106,40 @@ def collect_candidates(client: BiliClient) -> list[dict]:
     return unique
 
 
+def _tag_bonus(store: Store, tags: list[str], cfg: dict) -> tuple[float, str]:
+    """口味加分：每个 tag 的权重 × 系数，总和封顶，不让单个 tag 一手遮天。"""
+    discover_cfg = cfg.get("discover", {})
+    scale = float(discover_cfg.get("tag_weight_scale", 0.5))
+    cap = float(discover_cfg.get("tag_bonus_max", 1.5))
+    raw = sum(store.tag_weight(tag) * scale for tag in tags if tag)
+    bonus = max(-cap, min(cap, raw))
+    if abs(bonus) < 0.05:
+        return 0.0, ""
+    liked = [f"{tag}{store.tag_weight(tag):+.1f}" for tag in tags if store.tag_weight(tag) > 0]
+    disliked = [tag for tag in tags if store.tag_weight(tag) < 0]
+    if bonus > 0:
+        hint = f"按口味加了点分（{'、'.join(liked[:2])}）"
+    else:
+        hint = f"你屏蔽过这类（{'、'.join(disliked[:2])}）"
+    return bonus, hint
+
+
+def _fill_tags(client: BiliClient, videos: list[dict], limit: int) -> None:
+    """只给「有希望入选」的候选补 tag，避免一天几百个请求。"""
+    for index, video in enumerate(videos):
+        if index >= limit:
+            break
+        aid = int(video.get("aid") or 0)
+        if not aid:
+            continue
+        try:
+            tags = client.tags(aid)
+        except BiliError:
+            continue
+        if tags:
+            video["tags"] = tags[:8]
+
+
 def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -> dict:
     discover_cfg = cfg.get("discover", {})
     interests = [str(item) for item in cfg.get("interests", [])]
@@ -110,7 +147,9 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
     min_duration = int(discover_cfg.get("min_duration_seconds", 60))
     max_duration = int(discover_cfg.get("max_duration_seconds", 3600))
     min_score = int(discover_cfg.get("min_score", 6))
-    top_n = int(discover_cfg.get("top_n", 8))
+    count = int(discover_cfg.get("daily_count") or discover_cfg.get("top_n") or 10)
+    jitter_range = float(discover_cfg.get("randomness", 1.2))
+    tag_limit = int(discover_cfg.get("tag_fetch_limit", 30))
 
     result = {"fetched": 0, "scored": 0, "picked": 0, "errors": []}
     candidates = collect_candidates(client)
@@ -133,7 +172,7 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
 
     if not fresh:
         if not quiet:
-            log("  · 没有新面孔，等下轮")
+            log("  · 今天没有新面孔，等明天")
         return result
 
     if llm.available(cfg):
@@ -142,23 +181,68 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
         scores = {i: _heuristic_score(v, interests, block) for i, v in enumerate(fresh)}
     result["scored"] = len(scores)
 
+    # 先按模型分排一轮，只给有机会的候选补 tag（省请求）
+    ranked = sorted(
+        ((i, scores.get(i, (0, ""))) for i in range(len(fresh))),
+        key=lambda pair: pair[1][0],
+        reverse=True,
+    )
+    shortlist = [i for i, (score, _) in ranked if score >= min_score - 2][:tag_limit]
+    # _fill_tags 直接改的是 fresh 里的 dict，补完 tag 原处就能用
+    _fill_tags(client, [fresh[i] for i in shortlist], tag_limit)
+
     picked = []
     for index, video in enumerate(fresh):
         store.mark_seen(video.get("bvid", ""))
-        score, why = scores.get(index, (0, ""))
-        if score < min_score:
+        base, why = scores.get(index, (0, ""))
+        if base <= 0:
+            continue
+        tags = list(video.get("tags") or [])
+        if video.get("tname"):
+            tags.append(video["tname"])
+        bonus, hint = _tag_bonus(store, tags, cfg)
+        # 随机抖动：让同分视频轮流上位，别每次都是同一批
+        jitter = random.uniform(-jitter_range, jitter_range)
+        final = base + bonus + jitter
+        if base < min_score - 1 or final < min_score:
             continue
         video = dict(video)
-        video["score"] = score
-        video["reason"] = why
+        video["score"] = int(round(max(0, min(10, final))))
+        video["reason"] = " · ".join(part for part in (why, hint) if part)[:60]
+        video["tags"] = tags[:6]
         if store.add_feed(video):
             picked.append(video)
 
     picked.sort(key=lambda v: v["score"], reverse=True)
-    picked = picked[:top_n]
+    picked = picked[:count]
     result["picked"] = len(picked)
     if picked and not quiet:
-        log(f"  + 挑出 {len(picked)} 条：")
+        log(f"  + 今天挑了 {len(picked)} 条：")
         for video in picked:
-            log(f"    [{video['score']}] {video['title'][:40]} — {video['reason']}")
+            tags = "、".join(video.get("tags", [])[:3])
+            log(f"    [{video['score']}] {video['title'][:34]} | {tags}")
     return result
+
+
+def daily_due(store: Store, cfg: dict) -> bool:
+    """daily 模式：到点且今天还没跑过。"""
+    discover_cfg = cfg.get("discover", {})
+    if (discover_cfg.get("mode") or "daily") != "daily":
+        return False
+    at = str(discover_cfg.get("daily_at") or "09:00")
+    try:
+        hour, minute = (int(part) for part in at.split(":", 1))
+    except (ValueError, TypeError):
+        hour, minute = 9, 0
+    now = datetime.now()
+    last = store.get_meta("last_daily_date")
+    if last == now.strftime("%Y-%m-%d"):
+        return False
+    if not last:
+        # 从没跑过：第一次启动就先给一批，别让人干等到第二天
+        return True
+    return (now.hour, now.minute) >= (hour, minute)
+
+
+def mark_daily(store: Store) -> None:
+    store.set_meta("last_daily_date", datetime.now().strftime("%Y-%m-%d"))

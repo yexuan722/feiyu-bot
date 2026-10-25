@@ -44,7 +44,8 @@ DEFAULTS: dict = {
         # true  = 全自动：只回「@我 / 回复我」，带限速
         "auto_send": False,
         "poll_seconds": 180,
-        "discover_minutes": 60,
+        # 真找不到目标评论时，允不允许退化成「发在视频下」的新评论
+        "allow_top_level_reply": False,
         # 首次运行只处理这么多分钟内的消息，免得一上来把历史 @ 全回一遍
         "first_run_window_minutes": 120,
     },
@@ -54,12 +55,36 @@ DEFAULTS: dict = {
         "min_gap_seconds": 60,
         "max_reply_chars": 80,
     },
+    "dm": {
+        # 扫描私信（不代表会自动回）
+        "enabled": True,
+        # 私信自动回：和评论区的 auto_send 分开控制
+        "auto_reply": False,
+        "poll_seconds": 300,
+        "max_sessions_per_round": 6,
+        "max_per_hour": 5,
+        "min_gap_seconds": 30,
+        "max_reply_chars": 120,
+        # 空 = 谁都回；填了就只在白名单里回
+        "allowed_uids": [],
+        "blocked_uids": [],
+    },
     "discover": {
-        "top_n": 8,
+        # daily = 每天到点跑一次；interval = 每 interval_minutes 跑一次
+        "mode": "daily",
+        "daily_at": "09:00",
+        "daily_count": 10,
+        "interval_minutes": 180,
         "min_score": 6,
         "min_duration_seconds": 60,
         "max_duration_seconds": 3600,
         "block_keywords": ["广告", "抽奖", "推广", "带货", "直播回放"],
+        # 口味加权：weight ∈ [-3,3] × scale，总和封顶 ±tag_bonus_max
+        "tag_weight_scale": 0.5,
+        "tag_bonus_max": 1.5,
+        # 随机抖动 ±randomness，保证每次推荐的组合不一样
+        "randomness": 1.2,
+        "tag_fetch_limit": 30,
     },
     "interests": [
         "游戏实况",

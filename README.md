@@ -152,10 +152,40 @@ python feiyu_bot.py up
 
 右边 **本鱼捞的**：
 
-- 按 AI 打分排序，`9 分` 以上是橙色
+- 每天固定一批（默认 10 条），按 AI 打分排序，`9 分` 以上是橙色
 - 点标题直跳 B站；`没意思` 以后不再出现
+- 标题下面是 **tag**：**左键点** = 以后多推这类，**右键点** = 少推这类
+- 下方「口味权重」显示当前偏好，可以一键清零
 
 底部 **运行日志**：后台每轮干了什么，出错也在里面。
+
+### 回复位置
+
+草稿卡上会有一行 `📍` 说明这条要发到哪：
+
+| 提示 | 意思 |
+|---|---|
+| 回复到被 @ 的那条评论下 | 正常，挂在目标评论底下 |
+| 在子回复里定位到具体那条 | 挂在楼中楼的具体那层 |
+| 没定位到评论，发出去会变成视频下的新评论 | 危险，会变成顶层评论 |
+
+最后那种情况**默认不让发**，会直接报错拦下来。真想把评论发在视频底下，把 `mode.allow_top_level_reply` 改成 `true`。
+
+---
+
+## 私信自动回复
+
+```json
+"dm": { "enabled": true, "auto_reply": false }
+```
+
+- `enabled`：扫不扫私信（扫了也只是排队，不代表会自动回）
+- `auto_reply`：**私信自动回**，和评论区的 `auto_send` 分开控制
+
+规则：只看「最后一句是对方说的」会话，回完就不追了；白名单/黑名单用 `allowed_uids` / `blocked_uids`。
+
+⚠️ 私信这条链是 **beta**：`dev_id` 要从 `buvid3` 派生，算法没公开，本鱼写了两种拼法轮着试，**没在真号上验证过**。
+发不出去先跑 `python feiyu_bot.py dm-dump`，看接口到底返回了什么。
 
 ---
 
@@ -182,17 +212,28 @@ python feiyu_bot.py up
 |---|---|---|
 | `mode.auto_send` | `false` | 全自动开关 |
 | `mode.poll_seconds` | `180` | 多久扫一次 @ 和回复（最低 30 秒） |
-| `mode.discover_minutes` | `60` | 多久捞一次视频（最低 5 分钟） |
+| `mode.allow_top_level_reply` | `false` | 定位不到评论时，允不允许退回「发在视频下」 |
 | `mode.first_run_window_minutes` | `120` | 第一次跑只处理这么久以内的 @，避免把陈年消息全回一遍 |
 | `limits.max_per_hour` / `max_per_day` | 6 / 30 | 发送上限，**建议别改大** |
 | `limits.min_gap_seconds` | 60 | 自动发送的最小间隔 |
 | `limits.max_reply_chars` | 80 | 正文长度上限 |
+| `dm.enabled` | `true` | 扫不扫私信 |
+| `dm.auto_reply` | `false` | 私信自动回（独立开关） |
+| `dm.poll_seconds` | `300` | 多久扫一次私信 |
+| `dm.max_per_hour` / `min_gap_seconds` | 5 / 30 | 私信限速 |
+| `dm.allowed_uids` / `blocked_uids` | `[]` | 私信白名单/黑名单 |
+| `discover.mode` | `daily` | `daily` 每天一批，`interval` 按分钟轮询 |
+| `discover.daily_at` | `09:00` | 每天几点跑（本地时间） |
+| `discover.daily_count` | `10` | 每天固定挑几条 |
+| `discover.interval_minutes` | `180` | `interval` 模式的间隔 |
 | `discover.min_score` | 6 | 低于这个分数不投喂 |
-| `discover.top_n` | 8 | 每轮最多留几条 |
 | `discover.block_keywords` | 广告/抽奖/… | 标题命中就跳过 |
+| `discover.tag_weight_scale` | `0.5` | tag 权重换算成分数的系数 |
+| `discover.tag_bonus_max` | `1.5` | 单个 tag 加分**封顶**，防止变成回音壁 |
+| `discover.randomness` | `1.2` | 随机抖动 ±，保底留一点新鲜感 |
 | `interests` | 见示例 | 喂给模型的口味描述，越具体越准 |
 | `notify.webhook_enabled` + `webhook_url` + `webhook_type` | 关 | 推送到手机 |
-| `notify.dm_enabled` + `dm_to_uid` | 关 | 小号私信给主号（beta） |
+| `notify.dm_enabled` + `dm_to_uid` | 关 | 小号私信**推送推荐**给你（和上面的自动回复是两码事） |
 | `server.port` | 8765 | 换个端口防冲突 |
 
 环境变量也能覆盖：`FEIYU_SESSDATA` / `FEIYU_BILI_JCT` / `FEIYU_BUID3` / `FEIYU_UID` / `FEIYU_API_KEY` / `FEIYU_BASE_URL` / `FEIYU_MODEL` / `FEIYU_AUTO_SEND` / `FEIYU_PORT`。临时测试可以这样，长期还是写 `config.json`。
@@ -221,11 +262,13 @@ python feiyu_bot.py up
 | `bark` | `webhook_url` 填 `https://api.day.app/<你的key>` |
 | `dingtalk` / `feishu` | 群机器人 webhook，发纯文本 |
 
-### 私信（beta，可能失效）
+### 私信推送（beta，可能失效）
 
 ```json
 "notify": { "dm_enabled": true, "dm_to_uid": "你主号的UID" }
 ```
+
+这是「把推荐私信发给你」，和上面的「**私信自动回复**」是两码事，两个开关互不影响。
 
 **这块是半成品，本鱼先说实话**：B站 私信接口要一个 `dev_id`，官方前端是从 `buvid3` 的 md5 派生出来的，算法没公开。这里实现了两种常见拼法，依次重试，但**没在真号上验证过**，大概率要调。
 
@@ -244,8 +287,26 @@ python feiyu_bot.py up
 | 推荐流拉取失败 | wbi 签名或未登录 | 热门还能用，不影响主流程 |
 | 模型报 401 | key 错或没额度 | 换个 key / 换模型 |
 | 拉不到 @ 消息 | 字段变了 | `python feiyu_bot.py dump`，看 `debug/at.json` 里字段长什么样 |
+| 回复跑到视频底下 | 目标 rpid 没取到，`parent=0` | 已修：rpid 现在从 `source_id` 取；实在没有会拦下来不让发 |
+| 私信拉不到会话 | 接口改版 / `dev_id` 不对 | `python feiyu_bot.py dm-dump` 看原始返回 |
 
-`dump` 是排障神器：把原始 JSON 落盘，字段改名了一眼就能看出来。
+`dump` / `dm-dump` 是排障神器：把原始 JSON 落盘，字段改名了一眼就能看出来。
+
+---
+
+## 常用命令
+
+```powershell
+python feiyu_bot.py up          # 起锅（网页 + 后台）
+python feiyu_bot.py check       # 体检
+python feiyu_bot.py poll        # 手动扫 @ / 回复
+python feiyu_bot.py dm          # 手动扫私信
+python feiyu_bot.py discover    # 手动跑一轮推荐
+python feiyu_bot.py list        # 看队列
+python feiyu_bot.py tags        # 看口味权重（--reset 清零）
+python feiyu_bot.py send --id 3 # 发某条
+python feiyu_bot.py dm-dump     # 导出私信原始数据
+```
 
 ---
 
@@ -259,8 +320,9 @@ feiyu-bot/
 ├── bbot/
 │   ├── api.py            # B站 接口（含发评论、私信）
 │   ├── wbi.py            # WBI 签名
-│   ├── interact.py       # @ 消息 → 回复
-│   ├── discover.py       # 视频发现与打分
+│   ├── interact.py       # @ 消息 → 回复（含回复位置定位）
+│   ├── dm.py             # 私信自动回复
+│   ├── discover.py       # 每日推荐、打分、tag 加权
 │   ├── notify.py         # webhook / 私信
 │   ├── store.py          # SQLite 队列与去重
 │   ├── server.py         # 本地 HTTP 服务

@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS drafts (
     angle         TEXT,
     status        TEXT DEFAULT 'pending',
     error         TEXT,
-    sent_at       REAL
+    sent_at       REAL,
+    note          TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS feed (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +54,20 @@ CREATE TABLE IF NOT EXISTS feed (
     source      TEXT,
     created     REAL,
     status      TEXT DEFAULT 'new',
-    notified    INTEGER DEFAULT 0
+    notified    INTEGER DEFAULT 0,
+    tags        TEXT DEFAULT '',
+    batch       TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key     TEXT PRIMARY KEY,
+    value   TEXT
+);
+CREATE TABLE IF NOT EXISTS tag_pref (
+    tag       TEXT PRIMARY KEY,
+    weight    REAL DEFAULT 0,
+    likes     INTEGER DEFAULT 0,
+    dislikes  INTEGER DEFAULT 0,
+    updated   REAL
 );
 CREATE TABLE IF NOT EXISTS seen (
     bvid    TEXT PRIMARY KEY,
@@ -66,7 +80,7 @@ CREATE INDEX IF NOT EXISTS idx_feed_score ON feed(score);
 DRAFT_FIELDS = (
     "mkey", "kind", "created", "trigger_uid", "trigger_name", "trigger_text",
     "context", "bvid", "oid", "root", "parent", "title", "uri", "body", "angle",
-    "status", "error", "sent_at",
+    "status", "error", "sent_at", "note",
 )
 
 
@@ -77,6 +91,22 @@ class Store:
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self.conn.commit()
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """老库补列：SQLite 没有 ADD COLUMN IF NOT EXISTS，只能先查再加。"""
+        def cols(table: str) -> set[str]:
+            return {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+
+        if "note" not in cols("drafts"):
+            self.conn.execute("ALTER TABLE drafts ADD COLUMN note TEXT DEFAULT ''")
+        if "tags" not in cols("feed"):
+            self.conn.execute("ALTER TABLE feed ADD COLUMN tags TEXT DEFAULT ''")
+        if "batch" not in cols("feed"):
+            self.conn.execute("ALTER TABLE feed ADD COLUMN batch TEXT DEFAULT ''")
+            # 老数据归到「今天」这一批，免得升级后一片空白
+            self.conn.execute("UPDATE feed SET batch = date('now', 'localtime') WHERE batch = ''")
         self.conn.commit()
 
     # ------------------------------------------------------------ drafts
@@ -143,13 +173,15 @@ class Store:
             "created": time.time(),
             "status": "new",
             "notified": 0,
+            "tags": json.dumps(item.get("tags") or [], ensure_ascii=False),
+            "batch": time.strftime("%Y-%m-%d"),
         }
         try:
             cur = self.conn.execute(
                 "INSERT INTO feed (bvid, aid, title, owner, tname, duration, view_count, pic, url,"
-                " score, reason, source, created, status, notified)"
+                " score, reason, source, created, status, notified, tags, batch)"
                 " VALUES (:bvid,:aid,:title,:owner,:tname,:duration,:view_count,:pic,:url,"
-                " :score,:reason,:source,:created,:status,:notified)",
+                " :score,:reason,:source,:created,:status,:notified,:tags,:batch)",
                 row,
             )
             self.conn.commit()
@@ -162,10 +194,98 @@ class Store:
         rows = self.conn.execute(
             f"SELECT * FROM feed {where} ORDER BY score DESC, id DESC LIMIT ?", (limit,)
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["tags"] = json.loads(item.get("tags") or "[]")
+            except json.JSONDecodeError:
+                item["tags"] = []
+            out.append(item)
+        return out
+
+    def list_feed_latest_batch(self, limit: int = 10) -> list[dict]:
+        """只取「最近一批」的推荐——每天一批，不把历史堆在面板上。"""
+        row = self.conn.execute(
+            "SELECT batch FROM feed WHERE status != 'hidden' AND batch != ''"
+            " ORDER BY batch DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return []
+        batch = row["batch"]
+        rows = self.conn.execute(
+            "SELECT * FROM feed WHERE batch = ? AND status != 'hidden'"
+            " ORDER BY score DESC, id DESC LIMIT ?",
+            (batch, limit),
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["tags"] = json.loads(item.get("tags") or "[]")
+            except json.JSONDecodeError:
+                item["tags"] = []
+            out.append(item)
+        return out
+
+    def feed_total(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM feed WHERE status != 'hidden'"
+        ).fetchone()
+        return int(row["n"])
 
     def hide_feed(self, feed_id: int) -> None:
         self.conn.execute("UPDATE feed SET status = 'hidden' WHERE id = ?", (feed_id,))
+        self.conn.commit()
+
+    # ------------------------------------------------------------ 口味偏好
+
+    def tag_weight(self, tag: str) -> float:
+        row = self.conn.execute("SELECT weight FROM tag_pref WHERE tag = ?", (tag,)).fetchone()
+        return float(row["weight"]) if row else 0.0
+
+    def bump_tag(self, tag: str, delta: float) -> float:
+        """喜欢 +1，不喜欢 -1；权重限幅在 [-3, 3]，一次点击不会把推荐带偏。"""
+        tag = (tag or "").strip()
+        if not tag:
+            return 0.0
+        now = time.time()
+        liked = 1 if delta > 0 else 0
+        disliked = 1 if delta < 0 else 0
+        self.conn.execute(
+            "INSERT INTO tag_pref (tag, weight, likes, dislikes, updated) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(tag) DO UPDATE SET"
+            "   weight = MAX(-3.0, MIN(3.0, weight + ?)),"
+            "   likes = likes + ?, dislikes = dislikes + ?, updated = ?",
+            (tag, max(-3.0, min(3.0, delta)), liked, disliked, now,
+             delta, liked, disliked, now),
+        )
+        self.conn.commit()
+        return self.tag_weight(tag)
+
+    def list_tag_prefs(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM tag_pref WHERE ABS(weight) > 0.01 ORDER BY ABS(weight) DESC, updated DESC"
+            " LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def reset_tags(self) -> None:
+        self.conn.execute("DELETE FROM tag_pref")
+        self.conn.commit()
+
+    # ------------------------------------------------------------ meta
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = ?",
+            (key, str(value), str(value)),
+        )
         self.conn.commit()
 
     def pending_notify(self) -> list[dict]:
@@ -204,10 +324,23 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
-    def last_sent_at(self) -> float:
+    def sent_since_kind(self, kind: str, seconds: float) -> int:
+        cutoff = time.time() - seconds
         row = self.conn.execute(
-            "SELECT MAX(sent_at) AS t FROM drafts WHERE status = 'sent'"
+            "SELECT COUNT(*) AS n FROM drafts WHERE status = 'sent' AND sent_at > ? AND kind = ?",
+            (cutoff, kind),
         ).fetchone()
+        return int(row["n"])
+
+    def last_sent_at(self, kind: str | None = None) -> float:
+        if kind:
+            row = self.conn.execute(
+                "SELECT MAX(sent_at) AS t FROM drafts WHERE status = 'sent' AND kind = ?", (kind,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT MAX(sent_at) AS t FROM drafts WHERE status = 'sent'"
+            ).fetchone()
         return float(row["t"] or 0)
 
     def stats(self) -> dict:

@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import config as config_mod
-from . import discover, interact, notify
+from . import discover, dm, interact, notify
 from .api import BiliClient
 from .logbook import log, tail
 from .store import Store
@@ -46,28 +46,45 @@ class Runtime:
 
     def _draft_view(self, draft: dict) -> dict:
         bvid = draft.get("bvid") or ""
+        kind = draft.get("kind") or ""
+        label = {"at": "@我", "reply": "回复我", "dm": "私信"}.get(kind, kind or "?")
         return {
             "id": draft["id"],
-            "kind": draft.get("kind", ""),
-            "kind_label": "@我" if draft.get("kind") == "at" else "回复我",
+            "kind": kind,
+            "kind_label": label,
             "who": draft.get("trigger_name") or "某人",
             "trigger_text": draft.get("trigger_text") or "",
             "context": draft.get("context") or "",
-            "title": draft.get("title") or "（没取到视频标题）",
+            "title": draft.get("title") or ("私信" if kind == "dm" else "（没取到视频标题）"),
             "bvid": bvid,
             "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
             "body": draft.get("body") or "",
             "angle": draft.get("angle") or "",
+            "note": draft.get("note") or "",
             "age": _age(draft.get("created") or 0),
             "error": draft.get("error") or "",
             "status": draft.get("status") or "pending",
         }
 
     def state(self) -> dict:
+        daily_count = int(self.cfg.get("discover", {}).get("daily_count", 10))
         return {
             "status": config_mod.status(self.cfg),
             "stats": self.store.stats(),
             "limits": self.cfg.get("limits", {}),
+            "dm": {
+                "enabled": bool(self.cfg.get("dm", {}).get("enabled", True)),
+                "auto_reply": bool(self.cfg.get("dm", {}).get("auto_reply", False)),
+            },
+            "discover_cfg": {
+                "mode": self.cfg.get("discover", {}).get("mode", "daily"),
+                "daily_at": self.cfg.get("discover", {}).get("daily_at", "09:00"),
+                "daily_count": self.cfg.get("discover", {}).get("daily_count", 10),
+            },
+            "tag_prefs": [
+                {"tag": row["tag"], "weight": round(float(row["weight"]), 2)}
+                for row in self.store.list_tag_prefs(16)
+            ],
             "drafts": [self._draft_view(d) for d in self.store.list_drafts("pending", 50)],
             "failed": [self._draft_view(d) for d in self.store.list_drafts("failed", 10)],
             "feed": [
@@ -83,10 +100,12 @@ class Runtime:
                     "score": row["score"],
                     "reason": row["reason"],
                     "source": row["source"],
+                    "tags": row.get("tags") or [],
                     "age": _age(row["created"]),
                 }
-                for row in self.store.list_feed(40)
+                for row in self.store.list_feed_latest_batch(daily_count)
             ],
+            "feed_total": self.store.feed_total(),
             "logs": tail(50),
             "now": time.time(),
         }
@@ -127,22 +146,38 @@ class Runtime:
         log("· 扫一遍 @ 和回复")
         return interact.run_once(self.store, self.client, self.cfg)
 
+    def poll_dm(self) -> dict:
+        log("· 扫一遍私信")
+        return dm.run_once(self.store, self.client, self.cfg)
+
     def discover(self) -> dict:
         log("· 去首页捞视频")
         result = discover.run_once(self.store, self.client, self.cfg)
+        discover.mark_daily(self.store)
         for line in notify.notify_new(self.store, self.client, self.cfg):
             log(f"  · 通知 {line}")
         return result
 
+    def bump_tag(self, tag: str, delta: float) -> dict:
+        weight = self.store.bump_tag(tag, delta)
+        log(f"  · tag「{tag}」权重 {weight:+.1f}")
+        return {"ok": True, "message": f"「{tag}」权重 {weight:+.1f}", "weight": weight}
+
+    def reset_tags(self) -> dict:
+        self.store.reset_tags()
+        log("  · 口味偏好已清零")
+        return {"ok": True, "message": "口味偏好已清零"}
+
 
 class Worker(threading.Thread):
-    """后台循环：定时扫消息、定时捞视频。出错不退出，歇一会儿再来。"""
+    """后台循环：定时扫消息 / 扫私信 / 到点捞视频。出错不退出，歇一会儿再来。"""
 
     def __init__(self, runtime: Runtime):
         super().__init__(daemon=True, name="feiyu-worker")
         self.rt = runtime
         self._stop = threading.Event()
         self.last_poll = 0.0
+        self.last_dm = 0.0
         self.last_discover = 0.0
 
     def stop(self) -> None:
@@ -155,18 +190,34 @@ class Worker(threading.Thread):
             log(f"  ! {name} 出错：{type(exc).__name__}: {exc}")
 
     def run(self) -> None:
-        poll_seconds = max(30.0, float(self.rt.cfg.get("mode", {}).get("poll_seconds", 180)))
-        discover_seconds = max(
-            300.0, float(self.rt.cfg.get("mode", {}).get("discover_minutes", 60)) * 60
+        cfg = self.rt.cfg
+        poll_seconds = max(30.0, float(cfg.get("mode", {}).get("poll_seconds", 180)))
+        dm_cfg = cfg.get("dm", {})
+        dm_seconds = max(60.0, float(dm_cfg.get("poll_seconds", 300)))
+        disc_cfg = cfg.get("discover", {})
+        interval_seconds = max(300.0, float(disc_cfg.get("interval_minutes", 180)) * 60)
+
+        plan = (
+            f"推荐：每天 {disc_cfg.get('daily_at', '09:00')} 挑 {disc_cfg.get('daily_count', 10)} 条"
+            if (disc_cfg.get("mode") or "daily") == "daily"
+            else f"推荐：每 {int(interval_seconds // 60)} 分钟跑一次"
         )
-        log(f"循环启动：扫消息每 {int(poll_seconds)}s，捞视频每 {int(discover_seconds // 60)}min")
+        log(f"循环启动：扫消息 {int(poll_seconds)}s · 私信 {int(dm_seconds)}s · {plan}")
+
         first = True
         while not self._stop.is_set():
             now = time.time()
             if first or now - self.last_poll >= poll_seconds:
                 self._safe(self.rt.poll, "扫消息")
                 self.last_poll = time.time()
-            if first or now - self.last_discover >= discover_seconds:
+            if dm_cfg.get("enabled", True) and (first or now - self.last_dm >= dm_seconds):
+                self._safe(self.rt.poll_dm, "扫私信")
+                self.last_dm = time.time()
+            if (disc_cfg.get("mode") or "daily") == "daily":
+                if discover.daily_due(self.rt.store, cfg):
+                    self._safe(self.rt.discover, "每日推荐")
+                    self.last_discover = time.time()
+            elif first or now - self.last_discover >= interval_seconds:
                 self._safe(self.rt.discover, "捞视频")
                 self.last_discover = time.time()
             first = False
@@ -246,6 +297,19 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.runtime.discover()
                 reply = {"ok": True,
                          "message": f"捞到 {result['picked']} 条（看了 {result['fetched']} 个）"}
+            elif path == "/api/dm":
+                result = self.runtime.poll_dm()
+                if result.get("errors"):
+                    reply = {"ok": False, "message": "；".join(result["errors"])[:220]}
+                else:
+                    reply = {"ok": True,
+                             "message": f"私信：新 {result['new']} 条 / 会话 {result['sessions']} 个"}
+            elif path == "/api/tag":
+                reply = self.runtime.bump_tag(
+                    str(payload.get("tag") or ""), float(payload.get("delta", 1))
+                )
+            elif path == "/api/reset-tags":
+                reply = self.runtime.reset_tags()
             else:
                 reply = {"ok": False, "message": "没有这个接口"}
         except Exception as exc:  # noqa: BLE001

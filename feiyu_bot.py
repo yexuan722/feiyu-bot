@@ -8,16 +8,20 @@
     python feiyu_bot.py check     体检：Cookie / 模型 / wbi 签名
     python feiyu_bot.py demo      塞点假数据，先看界面长什么样
     python feiyu_bot.py poll      手动扫一遍 @ 和回复
-    python feiyu_bot.py discover  手动捞一轮视频
+    python feiyu_bot.py dm        手动扫一遍私信
+    python feiyu_bot.py discover  手动跑一轮推荐
     python feiyu_bot.py list      看看队列里有什么
+    python feiyu_bot.py tags      看看/重置口味权重
     python feiyu_bot.py send --id 3 [--body "临时改一句"]
-    python feiyu_bot.py dump      把原始消息存到 debug/ 方便对字段
+    python feiyu_bot.py dump      把原始 @ 消息存到 debug/
+    python feiyu_bot.py dm-dump   把原始私信存到 debug/（私信接口不对时用）
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import webbrowser
@@ -35,6 +39,7 @@ for stream in (sys.stdout, sys.stderr):
 
 from bbot import config as config_mod  # noqa: E402
 from bbot import discover as discover_mod  # noqa: E402
+from bbot import dm as dm_mod  # noqa: E402
 from bbot import interact, llm, notify  # noqa: E402
 from bbot.api import BiliClient, BiliError  # noqa: E402
 from bbot.logbook import log  # noqa: E402
@@ -285,6 +290,56 @@ def cmd_discover(args) -> int:
     return 0
 
 
+def cmd_dm(args) -> int:
+    cfg, store, client = build(args)
+    result = dm_mod.run_once(store, client, cfg)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if not result["errors"] else 1
+
+
+def cmd_dm_dump(args) -> int:
+    """私信接口报错时的排障入口：把会话和消息原样落盘。"""
+    cfg, store, client = build(args)
+    out_dir = HERE / "debug"
+    out_dir.mkdir(exist_ok=True)
+    try:
+        sessions = client.dm_sessions()
+    except BiliError as exc:
+        print(f"× 拉会话失败：[{exc.code}] {exc.message}")
+        print("  这多半说明 dev_id 或 Cookie 不对，私信这条链还用不了")
+        return 1
+    (out_dir / "dm_sessions.json").write_text(
+        json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"✓ {len(sessions)} 个会话 → {out_dir / 'dm_sessions.json'}")
+    for session in sessions[:3]:
+        talker = session["talker_id"]
+        try:
+            messages = client.dm_messages(talker, 10)
+        except BiliError as exc:
+            print(f"  × {talker}: [{exc.code}] {exc.message}")
+            continue
+        path = out_dir / f"dm_{talker}.json"
+        path.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  · {talker}: {len(messages)} 条 → {path.name}")
+    return 0
+
+
+def cmd_tags(args) -> int:
+    cfg, store, client = build(args)
+    if args.reset:
+        store.reset_tags()
+        print("✓ 口味权重已清零")
+    rows = store.list_tag_prefs(40)
+    if not rows:
+        print("还没有任何 tag 权重。去驾驶舱里点几个 tag 试试。")
+        return 0
+    print(f"{'tag':<16}{'权重':>7}{'赞':>5}{'踩':>5}")
+    for row in rows:
+        print(f"{row['tag']:<16}{row['weight']:>+7.1f}{row['likes']:>5}{row['dislikes']:>5}")
+    return 0
+
+
 def cmd_list(args) -> int:
     cfg, store, client = build(args)
     rows = store.list_drafts(args.status, 50)
@@ -335,8 +390,13 @@ def cmd_demo(args) -> int:
     """塞假数据，让界面先跑起来。用 data/demo.db，不碰真实队列。"""
     cfg = config_mod.load_config(args.config)
     demo_db = HERE / "data" / "demo.db"
-    if demo_db.exists():
-        demo_db.unlink()
+    try:
+        if demo_db.exists():
+            demo_db.unlink()
+    except OSError:
+        # Windows 上旧进程还占着文件，换一个名字继续
+        demo_db = HERE / "data" / f"demo-{os.getpid()}.db"
+        print(f"  (demo.db 被占用了，改用 {demo_db.name})")
     store = Store(demo_db)
     client = BiliClient(cfg)
 
@@ -350,6 +410,7 @@ def cmd_demo(args) -> int:
             "root": 111, "parent": 111, "title": "220w播放的片子vs他的12个挑战者，收藏的终极对决",
             "uri": "", "body": "哼，这叫储备粮！冬天要靠它过活的，你懂什么。",
             "angle": "模型生成", "status": "pending", "error": "", "sent_at": 0,
+            "note": "回复到被 @ 的那条评论下",
         },
         {
             "mkey": "demo-2", "kind": "reply", "created": now - 900,
@@ -360,6 +421,7 @@ def cmd_demo(args) -> int:
             "root": 222, "parent": 223, "title": "写完全国所有省份的love me",
             "uri": "", "body": "唔，这个本鱼真没记住，回去又拖了一遍进度条，好像还是左边那台。",
             "angle": "模型生成", "status": "pending", "error": "", "sent_at": 0,
+            "note": "在子回复里定位到具体那条",
         },
         {
             "mkey": "demo-3", "kind": "at", "created": now - 30,
@@ -368,6 +430,18 @@ def cmd_demo(args) -> int:
             "context": "", "bvid": "", "oid": 0, "root": 0, "parent": 0,
             "title": "", "uri": "", "body": "", "angle": "未配模型，手动写一句",
             "status": "pending", "error": "", "sent_at": 0,
+            "note": "没定位到评论，发出去会变成视频下的新评论",
+        },
+        {
+            "mkey": "demo-4", "kind": "dm", "created": now - 600,
+            "trigger_uid": 90004, "trigger_name": "UID 90004",
+            "trigger_text": "你这号是机器人吗，怎么回得这么快",
+            "context": "对方：在吗\n我：咕噜，在的",
+            "bvid": "", "oid": 90004, "root": 0, "parent": 0,
+            "title": "私信", "uri": "",
+            "body": "唔，被你看出来了。本鱼是脚本在跑，不过回你的这句是真心的。",
+            "angle": "模型生成", "status": "pending", "error": "", "sent_at": 0,
+            "note": "私信回复",
         },
     ]
     for sample in samples:
@@ -387,14 +461,23 @@ def cmd_demo(args) -> int:
     scores = [(9, "手工活，看完想动手"), (8, "信息密度高，没废话"), (8, "有梗，适合摸鱼"),
               (7, "选题怪但好玩"), (7, "科普讲得清楚"), (6, "可能合你口味"),
               (6, "下饭"), (5, "看看再说")]
+    tag_pool = [
+        ["美食", "手工", "硬核"], ["游戏", "整活", "鬼畜"], ["科普", "干货"],
+        ["动画", "杂谈"], ["纪录片", "社会"], ["科技", "编程"],
+    ]
     for index, video in enumerate(videos[:8]):
         video = dict(video)
         video["score"], video["reason"] = scores[index % len(scores)]
         video["source"] = "演示"
+        video["tags"] = tag_pool[index % len(tag_pool)]
         store.add_feed(video)
 
+    # 预置两个口味标签，方便直接看效果
+    store.bump_tag("美食", 2)
+    store.bump_tag("鬼畜", -1)
+
     print(f"✓ 演示数据写进 {demo_db}")
-    print(f"  3 条待发 / {min(8, len(videos))} 条投喂")
+    print(f"  4 条待发 / {min(8, len(videos))} 条投喂")
 
     runtime = Runtime(cfg, store, client)
     httpd = make_server(runtime, args.host, args.port)
@@ -458,9 +541,14 @@ def main() -> int:
     sub.add_parser("serve", parents=[GLOBAL], help="只起网页")
     sub.add_parser("check", parents=[GLOBAL], help="体检")
     sub.add_parser("poll", parents=[GLOBAL], help="手动扫一遍消息")
-    sub.add_parser("discover", parents=[GLOBAL], help="手动捞一轮视频")
+    sub.add_parser("dm", parents=[GLOBAL], help="手动扫一遍私信")
+    sub.add_parser("discover", parents=[GLOBAL], help="手动跑一轮推荐")
     sub.add_parser("dump", parents=[GLOBAL], help="把原始消息导出到 debug/")
+    sub.add_parser("dm-dump", parents=[GLOBAL], help="把原始私信导出到 debug/")
     sub.add_parser("demo", parents=[GLOBAL], help="用假数据预览界面")
+
+    tags_parser = sub.add_parser("tags", parents=[GLOBAL], help="看/清口味权重")
+    tags_parser.add_argument("--reset", action="store_true", help="清零所有 tag 权重")
 
     setup_parser = sub.add_parser("setup", parents=[GLOBAL], help="向导：填 Cookie 和模型")
     setup_parser.add_argument("--cookie", default="", help="整条 Cookie 字符串（可省，交互输入）")
@@ -501,7 +589,10 @@ def main() -> int:
         "setup": cmd_setup,
         "check": cmd_check,
         "poll": cmd_poll,
+        "dm": cmd_dm,
         "discover": cmd_discover,
+        "dm-dump": cmd_dm_dump,
+        "tags": cmd_tags,
         "list": cmd_list,
         "send": cmd_send,
         "dump": cmd_dump,

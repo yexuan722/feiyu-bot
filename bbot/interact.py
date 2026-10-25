@@ -81,6 +81,27 @@ def build_messages(cfg: dict, trigger: dict, video: dict | None) -> list[dict]:
     ]
 
 
+def build_dm_messages(cfg: dict, nickname: str, text: str, recent: list[str] | None = None) -> list[dict]:
+    """私信回复的提示词。比评论区稍微放松一点，但一样不许编。"""
+    persona = load_persona(cfg)
+    rules = """你正在 B站 私信里回复一个人，身份是小号「大肥鱼」。
+
+输出要求：
+- 只输出回复正文，20～60 字，口语化，像真人打字。
+- 私信比评论区随意一点，但别提钱、别提账号、别发链接、别要联系方式。
+- 对方如果是求助/提问：能给答案就给，给不了就说不知道。
+- 不要引号、不要前缀、不要换行、不要 emoji 堆砌。"""
+
+    parts = [f"对方昵称：{nickname or '某人'}", f"对方说：「{text[:300]}」"]
+    if recent:
+        parts.append("前几句聊天记录（供参考，别复读）：\n" + "\n".join(recent[-4:]))
+    parts.append("任务：回一条私信，40 字左右，人设别掉，也别太自来熟。")
+    return [
+        {"role": "system", "content": persona + "\n\n" + rules},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+
+
 def fetch_triggers(client: BiliClient, limit_per_feed: int = 20) -> list[dict]:
     """拉「@我的」和「回复我的」。任何一个失败都不影响另一个。"""
     triggers: list[dict] = []
@@ -106,6 +127,40 @@ def video_context(client: BiliClient, trigger: dict) -> dict | None:
         log(f"  ! 取视频信息失败：{exc.message}")
         return {"title": trigger.get("title") or "", "owner": "", "desc": "", "tname": ""}
     return info
+
+
+def resolve_target(client: BiliClient, oid: int, trigger: dict) -> tuple[int, int, str]:
+    """算出「回复挂在谁底下」：root = 顶层评论，parent = 被回的那条。
+
+    B站 的发评论接口如果不给 root/parent，就会变成一条新的顶层评论——
+    也就是「回复跑到了视频底下」。实测 @ 消息里 rpid 藏在 source_id，
+    这里再兜一层：没有 parent 就退回 root，别让它裸奔成新评论。
+    """
+    root = int(trigger.get("root") or 0)
+    parent = int(trigger.get("rpid") or 0)
+    uid = int(trigger.get("uid") or 0)
+    text = (trigger.get("text") or "").strip()
+
+    if parent:
+        return (root or parent), parent, "回复到被 @ 的那条评论下"
+
+    if root:
+        # 只知道顶层评论：去它的子回复里找具体那一条
+        try:
+            children = client.reply_thread(oid, root)
+        except BiliError:
+            children = []
+        needle = text[:20]
+        for child in children:
+            if child.get("uid") == uid and needle and needle in (child.get("message") or ""):
+                return root, int(child["rpid"] or 0), "在子回复里定位到具体那条"
+        return root, root, "回复到这条评论下"
+
+    found = client.find_comment(oid, uid, text)
+    if found:
+        return found["root"], found["rpid"], "按内容在评论区反查到的"
+
+    return 0, 0, "没定位到评论，发出去会变成视频下的新评论"
 
 
 def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -> dict:
@@ -142,6 +197,10 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
             continue
 
         video = video_context(client, trigger)
+        oid = int(trigger.get("oid") or trigger.get("aid") or (video or {}).get("aid") or 0)
+        root, parent, note = resolve_target(client, oid, trigger)
+        if not parent:
+            log(f"  ! 这条没定位到评论：{(trigger.get('text') or '')[:20]}")
         body, angle = "", ""
         if llm.available(cfg):
             try:
@@ -153,10 +212,6 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
                 result["errors"].append(str(exc)[:160])
         else:
             angle = "未配模型，手动写一句"
-
-        oid = int(trigger.get("oid") or trigger.get("aid") or 0)
-        parent = int(trigger.get("rpid") or 0)
-        root = int(trigger.get("root") or 0) or parent
 
         draft_id = store.add_draft(
             mkey=key,
@@ -174,6 +229,7 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
             body=body,
             angle=angle,
             status="pending",
+            note=note,
         )
         if draft_id is None:
             result["skipped"] += 1
@@ -202,11 +258,13 @@ def can_send(store: Store, cfg: dict, ignore_gap: bool = False) -> tuple[bool, s
     max_hour = int(limits.get("max_per_hour", 6))
     max_day = int(limits.get("max_per_day", 30))
     gap = float(limits.get("min_gap_seconds", 60))
-    if store.sent_since(3600) >= max_hour:
+    hour_count = store.sent_since_kind("at", 3600) + store.sent_since_kind("reply", 3600)
+    day_count = store.sent_since_kind("at", 86400) + store.sent_since_kind("reply", 86400)
+    if hour_count >= max_hour:
         return False, f"一小时内已发 {max_hour} 条"
-    if store.sent_since(86400) >= max_day:
+    if day_count >= max_day:
         return False, f"一天已发 {max_day} 条"
-    last = store.last_sent_at()
+    last = max(store.last_sent_at("at"), store.last_sent_at("reply"))
     if not ignore_gap and last and time.time() - last < gap:
         wait = int(gap - (time.time() - last))
         return False, f"还要等 {wait} 秒（最小间隔 {int(gap)}s）"
@@ -223,6 +281,10 @@ def deliver(store: Store, client: BiliClient, cfg: dict, draft: dict,
     message = (body if body is not None else draft.get("body") or "").strip()
     if not message:
         return False, "内容是空的，发什么呀"
+
+    if (draft.get("kind") or "") == "dm":
+        return _deliver_dm(store, client, cfg, draft, message)
+
     oid = int(draft.get("oid") or 0)
     if not oid:
         return False, "不知道这条评论挂在哪个视频下（oid 缺失），只能在网页里手动回"
@@ -230,6 +292,25 @@ def deliver(store: Store, client: BiliClient, cfg: dict, draft: dict,
     ok, why = can_send(store, cfg, ignore_gap=ignore_gap)
     if not ok:
         return False, f"限速：{why}"
+
+    root = int(draft.get("root") or 0)
+    parent = int(draft.get("parent") or 0)
+    note = draft.get("note") or ""
+
+    # 没有 parent 就等于发一条新的顶层评论——这不是「回复」，用户会看到它跑到视频底下
+    if not parent:
+        found = client.find_comment(
+            oid, int(draft.get("trigger_uid") or 0), draft.get("trigger_text") or ""
+        )
+        if found:
+            root, parent = found["root"], found["rpid"]
+            note = "发送前反查到了目标评论"
+            store.update_draft(draft_id, root=root, parent=parent, note=note)
+        elif not cfg.get("mode", {}).get("allow_top_level_reply", False):
+            return False, (
+                "找不到被 @ 的那条评论，发出去会变成视频下的新评论。"
+                "已在 config.json 里留了开关：mode.allow_top_level_reply=true 才允许这么发"
+            )
 
     referer = (
         f"https://www.bilibili.com/video/{draft['bvid']}"
@@ -240,8 +321,8 @@ def deliver(store: Store, client: BiliClient, cfg: dict, draft: dict,
         data = client.post_comment(
             oid=oid,
             message=message,
-            root=int(draft.get("root") or 0),
-            parent=int(draft.get("parent") or 0),
+            root=root,
+            parent=parent,
             referer=referer,
         )
     except BiliError as exc:
@@ -254,5 +335,35 @@ def deliver(store: Store, client: BiliClient, cfg: dict, draft: dict,
         body=message,
         sent_at=time.time(),
         error="",
+        root=root,
+        parent=parent,
+        note=note,
     )
-    return True, f"已发送（rpid={data.get('rpid') or '未知'}）"
+    return True, f"已发到 {'评论 #' + str(parent) if parent else '视频下'}（rpid={data.get('rpid') or '未知'}）"
+
+
+def _deliver_dm(store: Store, client: BiliClient, cfg: dict, draft: dict,
+                message: str) -> tuple[bool, str]:
+    draft_id = int(draft["id"])
+    uid = int(draft.get("oid") or 0)
+    if not uid:
+        return False, "不知道这条私信回给谁"
+
+    dm_cfg = cfg.get("dm", {})
+    max_hour = int(dm_cfg.get("max_per_hour", 5))
+    gap = float(dm_cfg.get("min_gap_seconds", 30))
+    if store.sent_since_kind("dm", 3600) >= max_hour:
+        return False, f"私信限速：一小时最多 {max_hour} 条"
+    last = store.last_sent_at("dm")
+    if last and time.time() - last < gap:
+        return False, f"私信还要等 {int(gap - (time.time() - last))} 秒"
+
+    try:
+        result = client.send_dm(uid, message)
+    except BiliError as exc:
+        store.update_draft(draft_id, status="failed", error=f"[{exc.code}] {exc.message}"[:300])
+        return False, f"[{exc.code}] {exc.message}"
+
+    store.update_draft(draft_id, status="sent", body=message, sent_at=time.time(), error="")
+    variant = result.get("variant")
+    return True, f"私信已发（dev_id 方案 {variant}）"

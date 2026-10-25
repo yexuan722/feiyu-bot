@@ -125,6 +125,9 @@
     background: var(--blue-soft); color: var(--blue-deep);
   }
   .tag.reply { background: #fff0f5; color: #cf4f7d; }
+  .tag.dm { background: #e8f8ef; color: #1c8a5a; }
+  .note { font-size: 11.5px; color: #6b7a93; margin: 2px 0 6px; }
+  .tagtime { font-size: 11px; color: var(--muted); }
   .time { font-size: 11px; color: var(--muted); }
   .angle { font-size: 11px; color: var(--muted); margin-left: auto; }
 
@@ -181,6 +184,18 @@
   .why::before { content: "“"; color: #c3cfe4; }
   .why::after { content: "”"; color: #c3cfe4; }
   .fbtns { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+
+  /* ---------- tags ---------- */
+  .chips { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
+  .chip {
+    font-size: 11px; padding: 2px 9px; border-radius: 999px; cursor: pointer;
+    border: 1px solid #dfe8f7; background: #f6f9ff; color: #3d5b8f;
+    font-family: inherit; transition: .15s;
+  }
+  .chip:hover { background: #e8f1ff; border-color: #c2d8ff; transform: translateY(-1px); }
+  .chip .w { opacity: .6; margin-left: 3px; }
+  .prefs { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .prefs .empty-hint { font-size: 12px; color: var(--muted); }
 
   /* ---------- logs ---------- */
   .logs {
@@ -239,6 +254,7 @@
   <div class="pills" id="pills"></div>
   <div class="actions">
     <button class="btn ghost" id="btnPoll">扫一通</button>
+    <button class="btn ghost" id="btnDm">扫私信</button>
     <button class="btn ghost" id="btnDiscover">捞视频</button>
     <button class="btn" id="btnRefresh">刷新</button>
   </div>
@@ -257,9 +273,14 @@
   <section class="col">
     <div class="col-head">
       <h2>本鱼捞的</h2>
-      <span class="hint">点开直接跳 B站</span>
+      <span class="hint" id="discoverHint">点开直接跳 B站</span>
     </div>
     <div class="feed" id="feed"></div>
+    <div class="col-head" style="margin-top:18px">
+      <h2>口味权重</h2>
+      <span class="hint">点 tag 加权重，右键减权重</span>
+    </div>
+    <div class="prefs" id="prefs"></div>
     <div class="col-head" style="margin-top:20px">
       <h2>运行日志</h2><span class="hint">最近 50 行</span>
     </div>
@@ -303,28 +324,42 @@ async function api(path, body) {
 function renderPills(st) {
   const s = st.status, stat = st.stats;
   const mode = s.auto_send ? "全自动" : "半自动";
+  const dm = st.dm || {};
+  const dmLabel = !dm.enabled ? "私信关" : (dm.auto_reply ? "私信全自动" : "私信待审");
   const pill = (dot, label) => `<span class="pill"><i class="dot ${dot}"></i>${esc(label)}</span>`;
   $("pills").innerHTML = [
     pill(s.cookie_ready ? "on" : "off", s.cookie_ready ? (s.uid ? "已登录 · UID " + s.uid : "Cookie 已填") : "没登录"),
     pill(s.model_ready ? "on" : "warn", s.model_ready ? esc(s.model) : "模型没配"),
     pill(s.auto_send ? "warn" : "on", mode),
+    pill(dm.auto_reply ? "warn" : (dm.enabled ? "on" : "off"), dmLabel),
     pill("", `今日已发 ${stat.sent_today} · 待发 ${stat.pending}`),
   ].join("");
   $("limitHint").textContent =
     `限速 ${st.limits.max_per_hour}/小时 · ${st.limits.max_per_day}/天 · 间隔 ${st.limits.min_gap_seconds}s`;
   $("pendingCount").textContent = stat.pending;
+
+  const dc = st.discover_cfg || {};
+  const todayCount = (st.feed || []).length;
+  $("discoverHint").textContent = dc.mode === "daily"
+    ? `今天这批 ${todayCount} 条（共 ${st.feed_total ?? todayCount}）· 每天 ${dc.daily_at} · 点开直跳 B站`
+    : `点开直接跳 B站`;
 }
 
 function draftCard(d, mode) {
   const value = (d.id in S.edits) ? S.edits[d.id] : d.body;
   const len = (value || "").length;
   const over = len > S.maxChars;
-  const kindCls = d.kind === "reply" ? "reply" : "";
+  const kindCls = d.kind === "reply" ? "reply" : (d.kind === "dm" ? "dm" : "");
   const url = d.url ? esc(d.url) : "";
   const failed = mode === "failed";
   const mainBtn = failed
     ? `<button class="btn tiny primary" data-act="retry" data-id="${d.id}">重试</button>`
     : `<button class="btn tiny primary" data-act="send" data-id="${d.id}" ${over ? "disabled" : ""}>发送</button>`;
+  const target = d.kind === "dm"
+    ? `<div class="vtitle" style="color:#1c8a5a">✉ 私信会话</div>`
+    : (url
+        ? `<a class="vtitle" href="${url}" target="_blank" rel="noreferrer">▶ ${esc(d.title)}</a>`
+        : `<div class="vtitle" style="color:#8794ab">▶ ${esc(d.title)}（没拿到链接）</div>`);
   return `
   <article class="card ${kindCls}" data-id="${d.id}">
     <div class="who">
@@ -335,9 +370,9 @@ function draftCard(d, mode) {
       <span class="angle">${esc(d.angle)}</span>
     </div>
     ${d.trigger_text ? `<blockquote class="quote">${esc(d.trigger_text)}</blockquote>` : ""}
-    ${d.context ? `<div class="ctx">你原来那条：<b>${esc(d.context)}</b></div>` : ""}
-    ${url ? `<a class="vtitle" href="${url}" target="_blank" rel="noreferrer">▶ ${esc(d.title)}</a>`
-          : `<div class="vtitle" style="color:#8794ab">▶ ${esc(d.title)}（没拿到链接）</div>`}
+    ${d.context ? `<div class="ctx">上文：<b>${esc(d.context).replace(/\n/g, " / ")}</b></div>` : ""}
+    ${target}
+    ${d.note ? `<div class="note">📍 ${esc(d.note)}</div>` : ""}
     <textarea data-id="${d.id}" placeholder="写点什么…" spellcheck="false">${esc(value)}</textarea>
     <div class="foot">
       <span class="chars ${over ? "over" : ""}" data-count="${d.id}">${len}/${S.maxChars}</span>
@@ -382,6 +417,10 @@ function renderFeed(st) {
             <span>${esc(f.source)}</span>
           </div>
           ${f.reason ? `<div class="why">${esc(f.reason)}</div>` : ""}
+          ${(f.tags || []).length ? `<div class="chips">${
+            f.tags.map((t) => `<button class="chip" data-tag="${esc(t)}" data-delta="1"
+              title="左键：多推这类 / 右键：少推这类">#${esc(t)}</button>`).join("")
+          }</div>` : ""}
         </div>
         <div class="fbtns">
           <span class="pill" style="font-size:11px">${f.score} 分</span>
@@ -390,6 +429,16 @@ function renderFeed(st) {
       </div>`).join("")
     : `<div class="empty"><span class="big">🎣</span><b>还没捞到东西</b>
          <small>点「捞视频」，本鱼去首页摸一圈。</small></div>`;
+}
+
+function renderPrefs(st) {
+  const prefs = st.tag_prefs || [];
+  const html = prefs.length
+    ? prefs.map((p) => `<button class="chip" data-tag="${esc(p.tag)}" data-delta="${p.weight > 0 ? -1 : 1}"
+          title="点一下调权重">#${esc(p.tag)}<span class="w">${p.weight > 0 ? "+" : ""}${p.weight}</span></button>`).join("")
+    : `<span class="empty-hint">还没点过 tag。在上面视频上点点看，本鱼会记着。</span>`;
+  $("prefs").innerHTML = html +
+    (prefs.length ? `<button class="btn tiny ghost" id="btnResetTags" style="margin-left:6px">清零</button>` : "");
 }
 
 function renderLogs(st) {
@@ -417,6 +466,7 @@ function render() {
   renderPills(st);
   renderDrafts(st);
   renderFeed(st);
+  renderPrefs(st);
   renderLogs(st);
 }
 
@@ -438,6 +488,23 @@ document.addEventListener("input", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
+  const chip = e.target.closest("button[data-tag]");
+  if (chip && !S.busy) {
+    const res = await api("/api/tag", {
+      tag: chip.dataset.tag,
+      delta: Number(chip.dataset.delta || 1),
+    });
+    toast(res.message, !res.ok);
+    await refresh();
+    return;
+  }
+  if (e.target.id === "btnResetTags") {
+    const res = await api("/api/reset-tags", {});
+    toast(res.message, !res.ok);
+    await refresh();
+    return;
+  }
+
   const btn = e.target.closest("button[data-act], button[data-hide]");
   if (!btn || S.busy) return;
 
@@ -509,7 +576,18 @@ async function action(path, btn, label) {
 
 $("btnRefresh").onclick = () => { refresh(); toast("已刷新"); };
 $("btnPoll").onclick = (e) => action("/api/poll", e.target, "扫扫扫…");
+$("btnDm").onclick = (e) => action("/api/dm", e.target, "翻私信…");
 $("btnDiscover").onclick = (e) => action("/api/discover", e.target, "捞捞捞…");
+
+// 右键 tag = 少推这类
+document.addEventListener("contextmenu", async (e) => {
+  const chip = e.target.closest("button[data-tag]");
+  if (!chip) return;
+  e.preventDefault();
+  const res = await api("/api/tag", { tag: chip.dataset.tag, delta: -1 });
+  toast(res.message, !res.ok);
+  await refresh();
+});
 
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refresh();

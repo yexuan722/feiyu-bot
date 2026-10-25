@@ -241,11 +241,21 @@ class BiliClient:
             text = _as_text(_first(reply, "content", "message"))
         context = _as_text(_first(item, "target_reply_content", "target_content", "origin_content"))
         uri = str(_first(item, "uri", "native_uri", default="") or "")
+        native_uri = str(item.get("native_uri") or "")
         title = str(_first(item, "title", default="") or "")
 
-        oid = _first(item, "subject_id", "business_id", "oid", "source_id", default=0)
-        root = _first(item, "root_id", "source_id", default=0)
-        rpid = _first(item, "target_id", "id", default=0)
+        # ⚠️ 实测字段：@ 消息里 root_id / target_id 常常都是 0，
+        # 真正那条评论的 rpid 在 source_id；native_uri 里还带着 comment_root_id。
+        # 少认了这两个，发出去就会变成视频下的新评论（不是回复）。
+        oid = _first(item, "subject_id", "oid", default=0)
+        root_id = int(_first(item, "root_id", default=0) or 0)
+        target_id = int(_first(item, "target_id", default=0) or 0)
+        source_id = int(_first(item, "source_id", default=0) or 0)
+        match = re.search(r"comment_root_id=(\d+)", native_uri)
+        uri_root = int(match.group(1)) if match else 0
+
+        parent = target_id or source_id
+        root = root_id or uri_root or source_id or parent
 
         bvid = ""
         match = _BV_RE.search(uri)
@@ -266,10 +276,10 @@ class BiliClient:
             "uri": uri,
             "oid": int(oid or 0),
             "root": int(root or 0),
-            "rpid": int(rpid or 0),
+            "rpid": int(parent or 0),
             "bvid": bvid,
             "aid": aid,
-            "timestamp": int(node.get("timestamp") or item.get("timestamp") or 0),
+            "timestamp": int(_first(node, "timestamp", "at_time", "pub_time", default=0) or 0),
             "raw": node,
         }
 
@@ -379,6 +389,156 @@ class BiliClient:
                     "source": "推荐",
                 }
             )
+        return out
+
+    # ---------------------------------------------------------------- 读：评论树
+
+    @staticmethod
+    def _parse_replies(data: dict | None) -> list[dict]:
+        """把一层评论（含内联的子回复）拍平成列表。"""
+        out: list[dict] = []
+        for reply in ((data or {}).get("replies") or []):
+            root = int(reply.get("root") or 0) or int(reply.get("rpid") or 0)
+            out.append(
+                {
+                    "rpid": int(reply.get("rpid") or 0),
+                    "root": root,
+                    "parent": int(reply.get("parent") or 0) or root,
+                    "uid": int((reply.get("member") or {}).get("mid") or 0),
+                    "uname": (reply.get("member") or {}).get("uname") or "",
+                    "message": _as_text(reply.get("content")).strip(),
+                }
+            )
+            for child in (reply.get("replies") or []):
+                out.append(
+                    {
+                        "rpid": int(child.get("rpid") or 0),
+                        "root": int(child.get("root") or 0) or root,
+                        "parent": int(child.get("parent") or 0) or root,
+                        "uid": int((child.get("member") or {}).get("mid") or 0),
+                        "uname": (child.get("member") or {}).get("uname") or "",
+                        "message": _as_text(child.get("content")).strip(),
+                    }
+                )
+        return out
+
+    def reply_page(self, oid: int, pn: int = 1, ps: int = 30, sort: int = 2) -> list[dict]:
+        """评论区顶层（sort: 0 时间 / 1 点赞 / 2 回复）。"""
+        data = self._request(
+            f"{API}/x/v2/reply",
+            params={"type": 1, "oid": oid, "pn": pn, "ps": ps, "sort": sort},
+        )
+        return self._parse_replies(data)
+
+    def reply_thread(self, oid: int, root: int, pn: int = 1, ps: int = 20) -> list[dict]:
+        """某条顶层评论下面的子回复。"""
+        data = self._request(
+            f"{API}/x/v2/reply/reply",
+            params={"type": 1, "oid": oid, "root": root, "pn": pn, "ps": ps},
+        )
+        return self._parse_replies(data)
+
+    def find_comment(self, oid: int, uid: int, text: str,
+                     max_roots: int = 40) -> dict | None:
+        """在评论区里反查「谁说了这句话」，用来找回被 @ 的那条评论的 rpid。
+
+        msgfeed 给的 id 有时拿不到，这时候只能靠内容匹配兜底。
+        """
+        needle = (text or "").strip()[:24]
+        if not (oid and uid and needle):
+            return None
+
+        def matches(reply: dict) -> bool:
+            if not reply.get("rpid"):
+                return False
+            if uid and reply.get("uid") != uid:
+                return False
+            body = (reply.get("message") or "").strip()
+            return needle in body or body[:24] == needle
+
+        # 1) 顶层评论（按时间倒序，最近的最可能）
+        roots: list[dict] = []
+        for page in (1, 2):
+            try:
+                batch = self.reply_page(oid, pn=page, ps=20, sort=0)
+            except BiliError:
+                break
+            roots.extend(batch)
+            if len(roots) >= max_roots:
+                break
+        for reply in roots:
+            if matches(reply):
+                return reply
+
+        # 2) 顶层评论底下的子回复
+        for root in roots[:12]:
+            root_rpid = int(root.get("rpid") or 0)
+            if not root_rpid:
+                continue
+            try:
+                children = self.reply_thread(oid, root_rpid)
+            except BiliError:
+                continue
+            for child in children:
+                if matches(child):
+                    return child
+        return None
+
+    # ---------------------------------------------------------------- 读：私信
+
+    def dm_sessions(self) -> list[dict]:
+        """私信会话列表。beta：字段随版本变，缺了就当没有。"""
+        data = self._request(
+            f"{VC_API}/session_svr/v1/session_svr/get_sessions",
+            params={"session_type": 1, "group_id": 0, "build": 0, "mobi_app": "web"},
+            referer="https://message.bilibili.com/",
+        ) or {}
+        out = []
+        for session in (data.get("session_list") or []):
+            out.append(
+                {
+                    "talker_id": int(session.get("talker_id") or 0),
+                    "unread": int(session.get("unread_count") or 0),
+                    "timestamp": int(session.get("timestamp") or 0),
+                    "last_text": _as_text(session.get("last_msg")),
+                }
+            )
+        return [item for item in out if item["talker_id"]]
+
+    def dm_messages(self, talker_id: int, size: int = 20) -> list[dict]:
+        data = self._request(
+            f"{VC_API}/svr_sync/v1/svr-sync/msgfeed",
+            params={
+                "talker_id": talker_id,
+                "session_type": 1,
+                "size": size,
+                "build": 0,
+                "mobi_app": "web",
+            },
+            referer="https://message.bilibili.com/",
+        ) or {}
+        out = []
+        for msg in (data.get("messages") or []):
+            content = msg.get("content")
+            text = ""
+            if isinstance(content, str):
+                try:
+                    parsed = json.loads(content)
+                    text = _as_text(parsed.get("content") if isinstance(parsed, dict) else parsed)
+                except json.JSONDecodeError:
+                    text = content[:500]
+            else:
+                text = _as_text(content)
+            out.append(
+                {
+                    "key": str(msg.get("msg_key") or ""),
+                    "from": int(msg.get("sender_uid") or 0),
+                    "ts": int(msg.get("timestamp") or 0),
+                    "type": int(msg.get("msg_type") or 1),
+                    "text": text.strip(),
+                }
+            )
+        out.sort(key=lambda item: item["ts"])
         return out
 
     # ---------------------------------------------------------------- 写
