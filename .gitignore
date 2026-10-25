@@ -1,0 +1,11 @@
+# 真实配置里有 Cookie 和 API Key，永远别提交
+config.json
+config.*.json
+data/
+debug/
+__pycache__/
+*.pyc
+*.log
+.venv/
+venv/
+.env
