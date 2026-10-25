@@ -234,6 +234,21 @@ class Store:
         ).fetchone()
         return int(row["n"])
 
+    def set_feed_tags(self, feed_id: int, tags: list[str]) -> None:
+        self.conn.execute(
+            "UPDATE feed SET tags = ? WHERE id = ?",
+            (json.dumps(tags, ensure_ascii=False), feed_id),
+        )
+        self.conn.commit()
+
+    def feed_missing_tags(self, limit: int = 40) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM feed WHERE status != 'hidden' AND (tags IS NULL OR tags = '' OR tags = '[]')"
+            " ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def hide_feed(self, feed_id: int) -> None:
         self.conn.execute("UPDATE feed SET status = 'hidden' WHERE id = ?", (feed_id,))
         self.conn.commit()

@@ -129,15 +129,19 @@ def _fill_tags(client: BiliClient, videos: list[dict], limit: int) -> None:
     for index, video in enumerate(videos):
         if index >= limit:
             break
-        aid = int(video.get("aid") or 0)
-        if not aid:
+        if video.get("tags"):
             continue
+        bvid = video.get("bvid") or ""
         try:
-            tags = client.tags(aid)
-        except BiliError:
+            tags = client.archive_tags(bvid=bvid, aid=int(video.get("aid") or 0))
+        except BiliError as exc:
+            log(f"  ! 取 tag 失败 {bvid}: [{exc.code}] {exc.message[:40]}")
             continue
         if tags:
             video["tags"] = tags[:8]
+        else:
+            # UP 主没给视频设 tag 的情况真的存在，不是每次都抓得到
+            log(f"  · {bvid} 这个视频没有 tag")
 
 
 def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -> dict:

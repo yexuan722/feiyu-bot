@@ -308,6 +308,7 @@ python feiyu_bot.py up
 | 拉不到 @ 消息 | 字段变了 | `python feiyu_bot.py dump`，看 `debug/at.json` 里字段长什么样 |
 | 回复跑到视频底下 | 目标 rpid 没取到，`parent=0` | 已修：rpid 现在从 `source_id` 取；实在没有会拦下来不让发 |
 | 私信字段对不上 | 接口改版 | `python feiyu_bot.py dm-dump` 看原始返回 |
+| 有些视频没有 tag | 以前推荐流的视频没解析出 `aid`，tag 接口查不了 | 已修（按 `bvid` 反查 aid）；老数据跑 `python feiyu_bot.py tags --fix` 补 |
 
 `dump` / `dm-dump` 是排障神器：把原始 JSON 落盘，字段改名了一眼就能看出来。
 
@@ -322,7 +323,7 @@ python feiyu_bot.py poll        # 手动扫 @ / 回复
 python feiyu_bot.py dm          # 手动扫私信
 python feiyu_bot.py discover    # 手动跑一轮推荐
 python feiyu_bot.py list        # 看队列
-python feiyu_bot.py tags        # 看口味权重（--reset 清零）
+python feiyu_bot.py tags        # 看口味权重（--reset 清零，--fix 补抓 tag）
 python feiyu_bot.py send --id 3 # 发某条
 python feiyu_bot.py dm-dump     # 导出私信原始数据
 ```

@@ -330,6 +330,25 @@ def cmd_tags(args) -> int:
     if args.reset:
         store.reset_tags()
         print("✓ 口味权重已清零")
+
+    if args.fix:
+        rows = store.feed_missing_tags(40)
+        print(f"有 {len(rows)} 条视频没 tag，开始补…")
+        fixed = 0
+        for row in rows:
+            try:
+                tags = client.archive_tags(bvid=row["bvid"], aid=int(row["aid"] or 0))
+            except BiliError as exc:
+                print(f"  × {row['bvid']}: [{exc.code}] {exc.message[:40]}")
+                continue
+            if tags:
+                store.set_feed_tags(row["id"], tags[:6])
+                fixed += 1
+                print(f"  ✓ {row['bvid']}: {'、'.join(tags[:4])}")
+            else:
+                print(f"  · {row['bvid']}: 这视频确实没设 tag")
+        print(f"补了 {fixed} 条")
+
     rows = store.list_tag_prefs(40)
     if not rows:
         print("还没有任何 tag 权重。去驾驶舱里点几个 tag 试试。")
@@ -549,6 +568,7 @@ def main() -> int:
 
     tags_parser = sub.add_parser("tags", parents=[GLOBAL], help="看/清口味权重")
     tags_parser.add_argument("--reset", action="store_true", help="清零所有 tag 权重")
+    tags_parser.add_argument("--fix", action="store_true", help="给缺 tag 的视频补抓一次")
 
     setup_parser = sub.add_parser("setup", parents=[GLOBAL], help="向导：填 Cookie 和模型")
     setup_parser.add_argument("--cookie", default="", help="整条 Cookie 字符串（可省，交互输入）")

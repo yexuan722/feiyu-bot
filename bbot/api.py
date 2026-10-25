@@ -306,19 +306,34 @@ class BiliClient:
             "url": f"https://www.bilibili.com/video/{data.get('bvid', bvid)}",
         }
 
-    def tags(self, aid: int) -> list[str]:
+    def archive_tags(self, bvid: str = "", aid: int = 0) -> list[str]:
+        """取视频 tag。只有 bvid 也能用——先换 aid 再查。"""
+        if not aid and bvid:
+            try:
+                aid = int(self.view(bvid=bvid).get("aid") or 0)
+            except BiliError:
+                return []
         if not aid:
             return []
+        params = {"aid": aid}
         try:
-            data = self._request(f"{API}/x/tag/archive/tags", params={"aid": aid}) or []
-        except BiliError:
-            return []
+            data = self._request(f"{API}/x/tag/archive/tags", params=params) or []
+        except BiliError as exc:
+            if exc.code not in (-403, -352, 412):
+                raise
+            data = self._request(f"{API}/x/tag/archive/tags", params=params, use_wbi=True) or []
         out = []
         for tag in data if isinstance(data, list) else []:
             name = tag.get("tag_name")
             if name:
                 out.append(name)
         return out[:12]
+
+    def tags(self, aid: int) -> list[str]:
+        try:
+            return self.archive_tags(aid=aid)
+        except BiliError:
+            return []
 
     def hot_replies(self, oid: int, ps: int = 6) -> list[str]:
         """热评，用来判断这个视频聊的是什么梗。失败就算了，不影响主流程。"""
@@ -373,13 +388,25 @@ class BiliClient:
         for video in (data.get("item") or []):
             if video.get("goto") not in (None, "av"):
                 continue
-            bvid = video.get("bvid") or video.get("id") or ""
-            if not str(bvid).startswith("BV"):
+            raw_id = video.get("id")
+            bvid = str(video.get("bvid") or "")
+            # 推荐流的视频号在 id 里，不在 aid 里；老代码漏了这个，导致 aid=0 拿不到 tag
+            aid = int(video.get("aid") or 0)
+            if not aid and str(raw_id or "").isdigit():
+                aid = int(raw_id)
+            if not bvid:
+                if not aid:
+                    continue
+                try:
+                    bvid = str(self.view(aid=aid).get("bvid") or "")
+                except BiliError:
+                    continue
+            if not bvid.startswith("BV"):
                 continue
             out.append(
                 {
                     "bvid": bvid,
-                    "aid": video.get("aid", 0),
+                    "aid": aid,
                     "title": video.get("title", ""),
                     "desc": (video.get("desc") or "")[:300],
                     "tname": video.get("tname", ""),
