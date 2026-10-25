@@ -36,10 +36,11 @@ def _age(ts: float) -> str:
 
 
 class Runtime:
-    def __init__(self, cfg: dict, store: Store, client: BiliClient):
+    def __init__(self, cfg: dict, store: Store, client: BiliClient, config_path=None):
         self.cfg = cfg
         self.store = store
         self.client = client
+        self.config_path = config_path
         self.lock = threading.Lock()
 
     # -------------------------------------------------------------- 读
@@ -167,6 +168,30 @@ class Runtime:
         self.store.reset_tags()
         log("  · 口味偏好已清零")
         return {"ok": True, "message": "口味偏好已清零"}
+
+    def set_mode(self, auto_send=None, dm_auto_reply=None) -> dict:
+        """改运行模式：内存里立刻生效，同时落盘，重启后还是这个设置。"""
+        notes = []
+        if auto_send is not None:
+            self.cfg.setdefault("mode", {})["auto_send"] = bool(auto_send)
+            notes.append("评论区：" + ("全自动" if auto_send else "半自动（点一下才发）"))
+        if dm_auto_reply is not None:
+            self.cfg.setdefault("dm", {})["auto_reply"] = bool(dm_auto_reply)
+            notes.append("私信：" + ("自动回" if dm_auto_reply else "手动审"))
+        try:
+            config_mod.save_config(self.cfg, self.config_path)
+            saved = "已写入 config.json"
+        except OSError as exc:
+            saved = f"写配置失败（{exc}），只在本次运行生效"
+
+        message = "；".join(notes) + f"，{saved}"
+        log("  · 切换模式 → " + "；".join(notes))
+        return {
+            "ok": True,
+            "message": message,
+            "auto_send": bool(self.cfg.get("mode", {}).get("auto_send")),
+            "dm_auto_reply": bool(self.cfg.get("dm", {}).get("auto_reply")),
+        }
 
 
 class Worker(threading.Thread):
@@ -310,6 +335,11 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/reset-tags":
                 reply = self.runtime.reset_tags()
+            elif path == "/api/mode":
+                reply = self.runtime.set_mode(
+                    auto_send=payload.get("auto_send"),
+                    dm_auto_reply=payload.get("dm_auto_reply"),
+                )
             else:
                 reply = {"ok": False, "message": "没有这个接口"}
         except Exception as exc:  # noqa: BLE001

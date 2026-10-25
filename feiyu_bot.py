@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -527,6 +528,51 @@ def cmd_daemon(args) -> int:
     return 0
 
 
+def cmd_mode(args) -> int:
+    """切换半自动/全自动。后台在跑就直接改内存（立刻生效），没跑就写配置文件。"""
+    cfg = config_mod.load_config(args.config)
+    payload = {}
+    if args.auto:
+        payload["auto_send"] = True
+    if args.semi:
+        payload["auto_send"] = False
+    if args.dm_auto:
+        payload["dm_auto_reply"] = True
+    if args.dm_manual:
+        payload["dm_auto_reply"] = False
+    if not payload:
+        st = config_mod.status(cfg)
+        print(f"评论区：{'全自动' if st['auto_send'] else '半自动'}")
+        print(f"私信：{'自动回' if cfg.get('dm', {}).get('auto_reply') else '手动审'}")
+        print("\n用法：mode --auto | --semi | --dm-auto | --dm-manual")
+        return 0
+
+    host = args.host or cfg.get("server", {}).get("host", "127.0.0.1")
+    port = args.port or cfg.get("server", {}).get("port", 8765)
+    body = json.dumps(payload).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            f"http://{host}:{port}/api/mode",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        print("✓ " + result.get("message", "已切换") + "（后台正在跑，立刻生效）")
+        return 0
+    except Exception:  # noqa: BLE001  后台没在跑，退回到改配置文件
+        pass
+
+    if "auto_send" in payload:
+        cfg.setdefault("mode", {})["auto_send"] = bool(payload["auto_send"])
+    if "dm_auto_reply" in payload:
+        cfg.setdefault("dm", {})["auto_reply"] = bool(payload["dm_auto_reply"])
+    config_mod.save_config(cfg, args.config)
+    print("✓ 已写入 config.json（后台没在跑，下次启动生效）")
+    return 0
+
+
 def cmd_list(args) -> int:
     cfg, store, client = build(args)
     rows = store.list_drafts(args.status, 50)
@@ -666,7 +712,7 @@ def cmd_demo(args) -> int:
     print(f"✓ 演示数据写进 {demo_db}")
     print(f"  4 条待发 / {min(8, len(videos))} 条投喂")
 
-    runtime = Runtime(cfg, store, client)
+    runtime = Runtime(cfg, store, client, args.config)
     try:
         httpd = make_server(runtime, args.host, args.port)
     except OSError as exc:
@@ -690,7 +736,7 @@ def cmd_demo(args) -> int:
 def cmd_serve(args, with_worker: bool) -> int:
     cfg, store, client = build(args)
     st = config_mod.status(cfg)
-    runtime = Runtime(cfg, store, client)
+    runtime = Runtime(cfg, store, client, args.config)
     try:
         httpd = make_server(runtime, args.host, args.port)
     except OSError as exc:
@@ -769,6 +815,12 @@ def main() -> int:
     install_parser = sub.add_parser("install", parents=[GLOBAL], help="装成开机自启（不需要管理员）")
     install_parser.add_argument("--task", action="store_true", help="改用计划任务（需要管理员）")
 
+    mode_parser = sub.add_parser("mode", parents=[GLOBAL], help="切半自动/全自动")
+    mode_parser.add_argument("--auto", action="store_true", help="评论区改全自动")
+    mode_parser.add_argument("--semi", action="store_true", help="评论区改回半自动")
+    mode_parser.add_argument("--dm-auto", action="store_true", help="私信改自动回")
+    mode_parser.add_argument("--dm-manual", action="store_true", help="私信改回手动审")
+
     args = parser.parse_args()
     args.config = getattr(args, "config", None)
     args.db = getattr(args, "db", None)
@@ -791,6 +843,7 @@ def main() -> int:
 
     handlers = {
         "setup": cmd_setup,
+        "mode": cmd_mode,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "daemon": cmd_daemon,

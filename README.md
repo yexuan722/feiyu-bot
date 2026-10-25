@@ -277,6 +277,25 @@ python feiyu_bot.py install --task
 
 全自动也不会给「敏感词命中」的草稿自动发（`bbot/interact.py` 里的 `RISKY_WORDS`）。
 
+### 怎么切换
+
+**① 面板上点**（推荐，立刻生效）：右上角那个 `半自动 ⇄` / `私信待审 ⇄` 的胶囊，点一下切，会弹确认框。
+
+**② 命令行**（后台在跑也能立刻生效）：
+
+```powershell
+python feiyu_bot.py mode --auto        # 评论区全自动
+python feiyu_bot.py mode --semi        # 退回半自动
+python feiyu_bot.py mode --dm-auto     # 私信自动回
+python feiyu_bot.py mode --dm-manual   # 私信退回手动审
+python feiyu_bot.py mode               # 看现在是什么模式
+```
+
+**③ 改 `config.json`**：`mode.auto_send` / `dm.auto_reply`，**改完要重启进程**才生效。
+
+> 全自动只影响「以后新收到的消息」；队列里已经躺着的草稿不会自己发出去。
+> 想停手：面板点回去，或者 `mode --semi`，一秒的事。
+
 ---
 
 ## 配置项

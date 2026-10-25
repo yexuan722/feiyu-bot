@@ -64,6 +64,11 @@
     background: #fff; border: 1px solid var(--line); color: var(--ink-soft);
     white-space: nowrap;
   }
+  .pillbtn {
+    font-family: inherit; cursor: pointer; transition: .16s ease;
+  }
+  .pillbtn:hover { border-color: #c2d8ff; background: #f4f8ff; transform: translateY(-1px); }
+  .pillbtn:active { transform: translateY(0); }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
   .dot.on { background: var(--ok); box-shadow: 0 0 0 3px rgba(31,157,104,.14); }
   .dot.off { background: var(--bad); box-shadow: 0 0 0 3px rgba(217,74,74,.12); }
@@ -336,8 +341,10 @@ function renderPills(st) {
   $("pills").innerHTML = [
     pill(cookieDot, cookieLabel),
     pill(s.model_ready ? "on" : "warn", s.model_ready ? esc(s.model) : "模型没配"),
-    pill(s.auto_send ? "warn" : "on", mode),
-    pill(dm.auto_reply ? "warn" : (dm.enabled ? "on" : "off"), dmLabel),
+    `<button class="pill pillbtn" id="modePill" data-auto="${s.auto_send ? 1 : 0}"
+        title="点一下切换：半自动 ⇄ 全自动"><i class="dot ${s.auto_send ? "warn" : "on"}"></i>${mode} ⇄</button>`,
+    `<button class="pill pillbtn" id="dmPill" data-dm="${dm.auto_reply ? 1 : 0}"
+        title="点一下切换：私信 自动回 ⇄ 手动审"><i class="dot ${dm.auto_reply ? "warn" : (dm.enabled ? "on" : "off")}"></i>${esc(dmLabel)} ⇄</button>`,
     pill("", `今日已发 ${stat.sent_today} · 待发 ${stat.pending}`),
   ].join("");
   $("limitHint").textContent =
@@ -494,6 +501,32 @@ document.addEventListener("input", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
+  const modeBtn = e.target.closest("#modePill");
+  if (modeBtn) {
+    const isAuto = modeBtn.dataset.auto === "1";
+    if (!isAuto && !confirm(
+      "开全自动后，新收到的 @ / 回复会直接发出去，不再经你审核。\n" +
+      "（仍守限速：6 条/小时、30 条/天；敏感词命中不自动发）\n\n确定要开吗？"
+    )) return;
+    const res = await api("/api/mode", { auto_send: !isAuto });
+    toast(res.message, !res.ok);
+    await refresh();
+    return;
+  }
+
+  const dmBtn = e.target.closest("#dmPill");
+  if (dmBtn) {
+    const isAuto = dmBtn.dataset.dm === "1";
+    if (!isAuto && !confirm(
+      "开私信自动回复后，对方发来的私信会被直接回复。\n" +
+      "（限速 5 条/小时，只回真人消息，系统推送会跳过）\n\n确定要开吗？"
+    )) return;
+    const res = await api("/api/mode", { dm_auto_reply: !isAuto });
+    toast(res.message, !res.ok);
+    await refresh();
+    return;
+  }
+
   const chip = e.target.closest("button[data-tag]");
   if (chip && !S.busy) {
     const res = await api("/api/tag", {
