@@ -143,17 +143,37 @@ def cmd_setup(args) -> int:
         print("\n· 跳过模型配置")
     else:
         print("\n【第 2 步】接模型（随便一个 OpenAI 兼容接口）")
-        print("  DeepSeek 官方：base_url=https://api.deepseek.com/v1  model=deepseek-chat")
+        print("  DeepSeek 官方：base_url=https://api.deepseek.com/v1  model=deepseek-flash（便宜大碗）")
         print("  本地 Ollama  ：base_url=http://127.0.0.1:11434/v1  model=qwen2.5:7b")
         print("  不想接就空着回车——@ 消息照样排队，你自己写正文就行\n")
 
         base_url = args.base_url or _ask(
             "  base_url", cfg["llm"].get("base_url") or "https://api.deepseek.com/v1"
         )
-        model = args.model or _ask("  模型名", cfg["llm"].get("model") or "deepseek-chat")
+
+        # 最常见的两种手滑：把 key 贴进 base_url、把 base_url 写少 http
+        api_key_guess = ""
+        if base_url.lower().startswith(("sk-", "sk_")):
+            print("  ! 这栏要的是接口地址，不是 key。这串看着像 API Key，本鱼先替你收着")
+            api_key_guess = base_url
+            base_url = "https://api.deepseek.com/v1"
+        elif not base_url.lower().startswith("http"):
+            print("  ! 这不像网址，先用默认 https://api.deepseek.com/v1")
+            base_url = "https://api.deepseek.com/v1"
+
+        model = args.model or _ask("  模型名", cfg["llm"].get("model") or "deepseek-flash")
         api_key = args.api_key
         if api_key is None:
-            api_key = _ask("  API Key（回车跳过）")
+            if api_key_guess:
+                api_key = api_key_guess
+                print("  刚才贴错位置的那串，本鱼当 API Key 用了")
+            else:
+                api_key = _ask("  API Key（回车跳过）")
+
+        # DeepSeek 默认开思考模式，写 40 字评论用不上，白烧输出 token
+        is_deepseek = "deepseek.com" in base_url
+        if is_deepseek:
+            print("  · 顺手关掉思考模式（评论用不上，省输出 token）")
 
         # 本地跑的模型（Ollama）不用 key，别因为「没填 key」把配置吞了
         is_local = any(host in base_url for host in ("127.0.0.1", "localhost", "0.0.0.0"))
@@ -161,6 +181,8 @@ def cmd_setup(args) -> int:
             cfg["llm"]["base_url"] = base_url
             cfg["llm"]["model"] = model
             cfg["llm"]["api_key"] = api_key or ""
+            if is_deepseek:
+                cfg["llm"]["extra_body"] = {"thinking": {"type": "disabled"}}
             config_mod.save_config(cfg, target)
             print(f"\n✓ 已写入模型配置：{model} @ {base_url}")
             try:

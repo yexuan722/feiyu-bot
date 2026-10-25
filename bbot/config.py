@@ -35,6 +35,9 @@ DEFAULTS: dict = {
         "temperature": 0.9,
         "max_tokens": 400,
         "timeout": 60,
+        # 原样塞进请求体的额外参数，比如 DeepSeek 关思考模式：
+        # {"thinking": {"type": "disabled"}}
+        "extra_body": {},
     },
     "mode": {
         # false = 半自动：生成后进审批队列，你在驾驶舱点一下才发

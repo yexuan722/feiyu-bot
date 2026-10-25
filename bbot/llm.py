@@ -42,6 +42,9 @@ def chat(cfg: dict, messages: list[dict], temperature: float | None = None,
         "max_tokens": max_tokens or llm.get("max_tokens", 400),
         "stream": False,
     }
+    extra = llm.get("extra_body")
+    if isinstance(extra, dict) and extra:
+        payload.update(extra)
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if llm.get("api_key"):

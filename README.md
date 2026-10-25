@@ -54,12 +54,15 @@ python feiyu_bot.py setup
 1. **整条 Cookie**：F12 → Network → 点任意请求 → Request Headers 里的 `Cookie:` 整行复制过来。
    向导会自己拆出 `SESSDATA / bili_jct / buvid3 / DedeUserID`，不用你一个个抄。
 2. **模型**：`base_url` / `model` / `api_key`，回车跳过也行（那就只排队、不生成）。
+   默认帮你填好 `https://api.deepseek.com/v1` + `deepseek-flash`，并且关掉思考模式。
+   注意 **`base_url` 那一栏填的是网址，不是 key**（贴错了向导会提醒并自动挪到 key 那栏）。
 
 不想交互，一条命令塞完也行：
 
 ```powershell
 python feiyu_bot.py setup `
   --cookie "SESSDATA=xxx; bili_jct=yyy; buvid3=zzz; DedeUserID=123" `
+  --model "deepseek-flash" `
   --api-key "sk-xxxx"
 ```
 
@@ -107,9 +110,24 @@ python feiyu_bot.py check
 "llm": {
   "base_url": "https://api.deepseek.com/v1",
   "api_key": "sk-...",
-  "model": "deepseek-chat"
+  "model": "deepseek-flash",
+  "extra_body": { "thinking": { "type": "disabled" } }
 }
 ```
+
+**`model` 名字是原样传给接口的**，服务端认不认是它的事——写错了直接 400/404，不会自动纠错。不同平台命名规则不一样，别混用。
+
+**常见便宜选项**（价格随时变，以官网为准）：
+
+| 平台 | base_url | model | 大概价钱 |
+|---|---|---|---|
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-flash` | 输入 1～2 元/百万 token，输出 4～8 元；**夜里和周末半价** |
+| DeepSeek 高端 | 同上 | `deepseek-v4-pro` | 贵 4～5 倍，写评论没必要 |
+| 硅基流动 | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-7B-Instruct` 等 | 有免费模型 |
+| 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` | 有免费档 |
+| 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5:7b` | 免费，费电 |
+
+`extra_body` 是原样塞进请求体的额外参数。DeepSeek 的思考模式**默认是开的**，写 40 字评论用不着它，只会拖慢速度、多烧输出 token，所以示例里关掉了。换别的平台如果报参数错误，把这一行删掉即可。
 
 没配模型时：@ 消息照样进队列，但正文是空的，要你自己写一句；发现视频退化成关键词匹配。
 
