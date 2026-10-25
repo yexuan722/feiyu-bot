@@ -242,6 +242,10 @@ def cmd_check(args) -> int:
         me = client.me(refresh=True)
         if me.get("is_login"):
             print(f"  ✓ 已登录：{me.get('uname')}（UID {me.get('mid')}，Lv{me.get('level')}）")
+            if st.get("cookie_days_left") is not None:
+                left = int(st["cookie_days_left"])
+                flag = "⚠️ 快到期了，记得重新粘一次" if left < 14 else ""
+                print(f"  · Cookie 到 {st.get('cookie_expires_at')} 过期，还剩 {left} 天 {flag}")
         else:
             print(f"  × 登录失败：{me.get('reason')}")
             print("    常见原因：SESSDATA 过期、复制少了尾巴、IP 变了")

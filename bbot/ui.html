@@ -327,8 +327,14 @@ function renderPills(st) {
   const dm = st.dm || {};
   const dmLabel = !dm.enabled ? "私信关" : (dm.auto_reply ? "私信全自动" : "私信待审");
   const pill = (dot, label) => `<span class="pill"><i class="dot ${dot}"></i>${esc(label)}</span>`;
+  const days = s.cookie_days_left;
+  const cookieLabel = !s.cookie_ready
+    ? "没登录"
+    : (s.uid ? "已登录 · UID " + s.uid : "Cookie 已填")
+      + (typeof days === "number" ? ` · 剩 ${days} 天` : "");
+  const cookieDot = !s.cookie_ready ? "off" : (typeof days === "number" && days < 14 ? "warn" : "on");
   $("pills").innerHTML = [
-    pill(s.cookie_ready ? "on" : "off", s.cookie_ready ? (s.uid ? "已登录 · UID " + s.uid : "Cookie 已填") : "没登录"),
+    pill(cookieDot, cookieLabel),
     pill(s.model_ready ? "on" : "warn", s.model_ready ? esc(s.model) : "模型没配"),
     pill(s.auto_send ? "warn" : "on", mode),
     pill(dm.auto_reply ? "warn" : (dm.enabled ? "on" : "off"), dmLabel),

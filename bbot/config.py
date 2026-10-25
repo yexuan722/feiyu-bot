@@ -10,6 +10,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import urllib.parse
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -172,12 +174,35 @@ def masked(value: str, keep: int = 4) -> str:
     return f"{value[:keep]}…{value[-keep:]}（{len(value)} 字符）"
 
 
+def cookie_expiry(sessdata: str) -> datetime | None:
+    """SESSDATA 的明文是 `随机串,过期时间戳,签名`，第二个字段就是到期时间。
+
+    解析不出来就返回 None——B站 哪天换格式了也不至于崩。
+    """
+    raw = urllib.parse.unquote((sessdata or "").strip())
+    parts = raw.split(",")
+    if len(parts) >= 2 and parts[1].isdigit():
+        try:
+            return datetime.fromtimestamp(int(parts[1]))
+        except (ValueError, OSError, OverflowError):
+            return None
+    return None
+
+
 def status(cfg: dict) -> dict:
     llm = cfg.get("llm", {})
     bili = cfg.get("bili", {})
+    expiry = cookie_expiry(bili.get("sessdata", ""))
+    days_left = None
+    expires_at = ""
+    if expiry:
+        expires_at = expiry.strftime("%Y-%m-%d")
+        days_left = int((expiry - datetime.now()).total_seconds() // 86400)
     return {
         "cookie_ready": bool(bili.get("sessdata") and bili.get("bili_jct")),
         "cookie_hint": masked(bili.get("sessdata", "")),
+        "cookie_days_left": days_left,
+        "cookie_expires_at": expires_at,
         "uid": bili.get("dedeuserid") or "",
         "model_ready": bool(llm.get("base_url") and llm.get("model")),
         "model": llm.get("model") or "",
