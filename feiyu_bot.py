@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import webbrowser
@@ -43,6 +44,7 @@ from bbot import dm as dm_mod  # noqa: E402
 from bbot import interact, llm, notify  # noqa: E402
 from bbot.api import BiliClient, BiliError  # noqa: E402
 from bbot.logbook import log  # noqa: E402
+from bbot import logbook  # noqa: E402
 from bbot.server import Runtime, Worker, make_server  # noqa: E402
 from bbot.store import Store  # noqa: E402
 
@@ -363,6 +365,168 @@ def cmd_tags(args) -> int:
     return 0
 
 
+TASK_NAME = "FeiyuBot"
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_DIR = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs/Startup"
+STARTUP_VBS = STARTUP_DIR / "feiyu-bot.vbs"
+
+
+def _run_task_cmd(argv: list[str]) -> tuple[int, str]:
+    proc = subprocess.run(
+        ["schtasks", *argv], capture_output=True, text=True, encoding="gbk", errors="replace"
+    )
+    return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()
+
+
+def _task_command() -> str:
+    """用 pythonw 起，才不会弹出一个黑窗口。"""
+    python_exe = Path(sys.executable)
+    pythonw = python_exe.with_name("pythonw.exe")
+    exe = pythonw if pythonw.exists() else python_exe
+    return f'"{exe}" "{HERE / "feiyu_bot.py"}" up --no-browser'
+
+
+def _install_run_key(command: str) -> bool:
+    """写 HKCU 的 Run 键：当前用户登录后自动跑，不需要管理员。"""
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, TASK_NAME, 0, winreg.REG_SZ, command)
+        return True
+    except OSError:
+        return False
+
+
+def _uninstall_run_key() -> bool:
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, TASK_NAME)
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+def _run_key_value() -> str:
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            return str(winreg.QueryValueEx(key, TASK_NAME)[0])
+    except (ImportError, OSError):
+        return ""
+
+
+def _install_startup_vbs(command: str) -> bool:
+    """注册表写不进去就退回启动文件夹：放个 vbs，用 0 号窗口静默启动。"""
+    if not STARTUP_DIR.exists():
+        return False
+    try:
+        STARTUP_DIR.mkdir(parents=True, exist_ok=True)
+        content = (
+            'Set sh = CreateObject("WScript.Shell")\r\n'
+            f'sh.Run "{command}", 0, False\r\n'
+        )
+        STARTUP_VBS.write_text(content, encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def cmd_install(args) -> int:
+    command = _task_command()
+    print("=" * 52)
+    print("装成开机自启")
+    print("=" * 52)
+    print(f"  启动命令：{command}")
+
+    if args.task:
+        code, out = _run_task_cmd(
+            ["/Create", "/TN", TASK_NAME, "/TR", command, "/SC", "ONLOGON", "/RL", "LIMITED", "/F"]
+        )
+        if code != 0:
+            print(f"\n× 计划任务没建成：{out[:300]}")
+            print("  这条要管理员权限。去掉 --task 用默认方式（不需要提权）。")
+            return 1
+        print("\n✓ 已装计划任务（需要管理员的那种）")
+        print(f"  立刻启动： schtasks /Run /TN {TASK_NAME}")
+        return 0
+
+    if _install_run_key(command):
+        print("\n✓ 已写入当前用户的启动项（登录 Windows 就自动跑，无窗口）")
+    elif _install_startup_vbs(command):
+        print(f"\n✓ 注册表写不进去，改用启动文件夹：{STARTUP_VBS}")
+    else:
+        print("\n× 两种自动启动都装不上。只能手动：开着终端跑 up。")
+        return 1
+
+    print(f"  日志文件：{logbook.LOG_DIR}")
+    print(f"  面板地址：http://{args.host}:{args.port}")
+    print("\n  现在就想起？直接双击 run.ps1，或：")
+    print(f"    python feiyu_bot.py up            # 前台（关窗口=停）")
+    print(f"    python feiyu_bot.py serve         # 只要面板")
+    print("  卸载：python feiyu_bot.py uninstall")
+    return 0
+
+
+def cmd_uninstall(args) -> int:
+    removed = []
+    if _uninstall_run_key():
+        removed.append("注册表启动项")
+    if STARTUP_VBS.exists():
+        try:
+            STARTUP_VBS.unlink()
+            removed.append("启动文件夹快捷方式")
+        except OSError:
+            pass
+    code, _out = _run_task_cmd(["/Delete", "/TN", TASK_NAME, "/F"])
+    if code == 0:
+        removed.append("计划任务")
+    if not removed:
+        print("· 没找到任何自启配置，本来就没装")
+        return 0
+    print("✓ 已移除：" + "、".join(removed))
+    print("  （如果 bot 现在正在跑，它不会停；去任务管理器结束 pythonw.exe 或重启）")
+    return 0
+
+
+def cmd_daemon(args) -> int:
+    print("=" * 52)
+    print("后台常驻状态")
+    print("=" * 52)
+
+    run_value = _run_key_value()
+    if run_value:
+        print("  ✓ 注册表启动项：已装")
+        print("    " + run_value[:100])
+    else:
+        print("  · 注册表启动项：没装")
+
+    if STARTUP_VBS.exists():
+        print(f"  ✓ 启动文件夹：{STARTUP_VBS.name}")
+    else:
+        print("  · 启动文件夹：没有")
+
+    code, out = _run_task_cmd(["/Query", "/TN", TASK_NAME])
+    print("  " + ("✓ 计划任务：已装" if code == 0 else "· 计划任务：没装（要管理员才能装）"))
+
+    print(f"\n  日志文件：{logbook.log_path()}")
+    print(f"  面板地址：http://{args.host}:{args.port}")
+    print("\n  正在运行的 pythonw / python 进程：")
+    try:
+        proc = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq pythonw.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, encoding="gbk", errors="replace",
+        )
+        lines = [ln for ln in (proc.stdout or "").splitlines() if "pythonw" in ln]
+        print("    " + ("\n    ".join(lines) if lines else "（没有 pythonw 在跑）"))
+    except OSError:
+        pass
+    return 0
+
+
 def cmd_list(args) -> int:
     cfg, store, client = build(args)
     rows = store.list_drafts(args.status, 50)
@@ -503,7 +667,11 @@ def cmd_demo(args) -> int:
     print(f"  4 条待发 / {min(8, len(videos))} 条投喂")
 
     runtime = Runtime(cfg, store, client)
-    httpd = make_server(runtime, args.host, args.port)
+    try:
+        httpd = make_server(runtime, args.host, args.port)
+    except OSError as exc:
+        print(f"× 端口 {args.port} 起不来：{exc}（换个端口试试 --port {args.port + 1}）")
+        return 1
     url = f"http://{args.host}:{args.port}"
     print(f"\n驾驶舱：{url}   （Ctrl+C 退出）")
     print("注意：demo 模式下「发送」会真去调 B站，没 Cookie 会失败，这是正常的。")
@@ -523,7 +691,14 @@ def cmd_serve(args, with_worker: bool) -> int:
     cfg, store, client = build(args)
     st = config_mod.status(cfg)
     runtime = Runtime(cfg, store, client)
-    httpd = make_server(runtime, args.host, args.port)
+    try:
+        httpd = make_server(runtime, args.host, args.port)
+    except OSError as exc:
+        log(f"× 端口 {args.port} 起不来：{exc}（可能已经有一个 bot 在跑）")
+        print(f"× 端口 {args.port} 起不来：{exc}")
+        print(f"  可能已经有一个 bot 在跑了，先开 http://{args.host}:{args.port} 看看；")
+        print(f"  或者换个端口：--port {args.port + 1}")
+        return 1
     url = f"http://{args.host}:{args.port}"
 
     if with_worker:
@@ -562,6 +737,8 @@ def main() -> int:
 
     sub.add_parser("up", parents=[GLOBAL], help="后台 + 网页一起跑")
     sub.add_parser("serve", parents=[GLOBAL], help="只起网页")
+    sub.add_parser("uninstall", parents=[GLOBAL], help="卸掉开机自启")
+    sub.add_parser("daemon", parents=[GLOBAL], help="看后台常驻状态")
     sub.add_parser("check", parents=[GLOBAL], help="体检")
     sub.add_parser("poll", parents=[GLOBAL], help="手动扫一遍消息")
     sub.add_parser("dm", parents=[GLOBAL], help="手动扫一遍私信")
@@ -589,6 +766,9 @@ def main() -> int:
     send_parser.add_argument("--id", type=int, required=True)
     send_parser.add_argument("--body", default=None, help="临时替换正文")
 
+    install_parser = sub.add_parser("install", parents=[GLOBAL], help="装成开机自启（不需要管理员）")
+    install_parser.add_argument("--task", action="store_true", help="改用计划任务（需要管理员）")
+
     args = parser.parse_args()
     args.config = getattr(args, "config", None)
     args.db = getattr(args, "db", None)
@@ -611,6 +791,9 @@ def main() -> int:
 
     handlers = {
         "setup": cmd_setup,
+        "install": cmd_install,
+        "uninstall": cmd_uninstall,
+        "daemon": cmd_daemon,
         "check": cmd_check,
         "poll": cmd_poll,
         "dm": cmd_dm,

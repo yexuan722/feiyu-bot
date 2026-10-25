@@ -161,6 +161,35 @@ python feiyu_bot.py up
 
 浏览器会自己打开 `http://127.0.0.1:8765`。
 
+### 让它一直跑（不用守着终端）
+
+`up` 是个普通进程，**关掉终端窗口它就停了**。想让它常驻：
+
+```powershell
+python feiyu_bot.py install
+```
+
+它会在当前用户的启动项里写一条（`HKCU\...\Run`，**不需要管理员**），下次登录 Windows 就用 `pythonw` 静默启动，没有黑窗口。
+
+```powershell
+python feiyu_bot.py daemon      # 看装没装、进程在不在、日志在哪
+python feiyu_bot.py uninstall   # 卸掉自启（正在跑的进程不会停）
+```
+
+需要更正式的托管（开机即启、不依赖登录）用计划任务，**要管理员**：
+
+```powershell
+python feiyu_bot.py install --task
+```
+
+**两个坑**：
+
+1. **电脑睡眠/休眠 = 进程挂起**，醒来才会继续。要 24 小时跑，把电源选项改成「从不睡眠」（至少插电时）。
+2. 后台跑没有终端输出，看日志：`data/logs/feiyu-YYYY-MM-DD.log`（每天一个文件）。
+3. 后台跑起来之后，面板还是那个地址，浏览器随时打开看。
+
+如果不想装自启，也可以就开着终端跑 —— 只要那个窗口别关。
+
 ---
 
 ## 驾驶舱怎么用
@@ -340,6 +369,9 @@ python feiyu_bot.py up
 
 ```powershell
 python feiyu_bot.py up          # 起锅（网页 + 后台）
+python feiyu_bot.py install     # 装成开机自启（--task 用计划任务，要管理员）
+python feiyu_bot.py daemon      # 看后台常驻状态
+python feiyu_bot.py uninstall   # 卸掉自启
 python feiyu_bot.py check       # 体检
 python feiyu_bot.py poll        # 手动扫 @ / 回复
 python feiyu_bot.py dm          # 手动扫私信
