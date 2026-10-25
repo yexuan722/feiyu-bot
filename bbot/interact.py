@@ -365,5 +365,4 @@ def _deliver_dm(store: Store, client: BiliClient, cfg: dict, draft: dict,
         return False, f"[{exc.code}] {exc.message}"
 
     store.update_draft(draft_id, status="sent", body=message, sent_at=time.time(), error="")
-    variant = result.get("variant")
-    return True, f"私信已发（dev_id 方案 {variant}）"
+    return True, f"私信已发（msg_key={result.get('msg_key') or '未知'}）"

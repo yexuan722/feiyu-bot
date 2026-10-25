@@ -12,6 +12,9 @@ from .api import BiliClient, BiliError
 from .logbook import log
 from .store import Store, draft_key
 
+# 只有这几个来源算「真人发的」：0 未知 / 1 iOS / 2 安卓 / 3 H5 / 4 PC / 7 Web
+HUMAN_SOURCES = {0, 1, 2, 3, 4, 7}
+
 
 def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -> dict:
     result = {"sessions": 0, "new": 0, "sent": 0, "errors": []}
@@ -57,7 +60,14 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
         if messages[-1]["from"] == my_uid:
             continue
 
-        theirs = [m for m in messages if m["from"] != my_uid and m["type"] == 1 and m["text"]]
+        # 跳过系统推送/自动回复（互相关注提示、活动通知之类），别对着机器说话
+        theirs = [
+            m for m in messages
+            if m["from"] != my_uid
+            and m["type"] == 1
+            and m["text"]
+            and m.get("source", 0) in HUMAN_SOURCES
+        ]
         if not theirs:
             continue
         last = theirs[-1]

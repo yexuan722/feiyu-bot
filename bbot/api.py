@@ -8,13 +8,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 from . import wbi
 
@@ -138,15 +138,17 @@ class BiliClient:
             img, sub = self._wbi()
             params = wbi.sign(params, img, sub)
 
+        # 私信发送这类接口「URL 带签名参数 + 正文带表单」，两边都要
+        full = url
+        if params:
+            full = f"{url}?{urllib.parse.urlencode(params)}"
+
         if form is not None:
             body = urllib.parse.urlencode(form).encode("utf-8")
             headers = self._headers(referer)
             headers["Content-Type"] = "application/x-www-form-urlencoded"
-            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            req = urllib.request.Request(full, data=body, headers=headers, method="POST")
         else:
-            full = url
-            if params:
-                full = f"{url}?{urllib.parse.urlencode(params)}"
             req = urllib.request.Request(full, headers=self._headers(referer), method="GET")
 
         try:
@@ -487,10 +489,11 @@ class BiliClient:
     # ---------------------------------------------------------------- 读：私信
 
     def dm_sessions(self) -> list[dict]:
-        """私信会话列表。beta：字段随版本变，缺了就当没有。"""
+        """私信会话列表。"""
         data = self._request(
             f"{VC_API}/session_svr/v1/session_svr/get_sessions",
-            params={"session_type": 1, "group_id": 0, "build": 0, "mobi_app": "web"},
+            params={"session_type": 1, "group_fold": 0, "unfollow_fold": 0,
+                    "sort_rule": 2, "size": 50, "build": 0, "mobi_app": "web"},
             referer="https://message.bilibili.com/",
         ) or {}
         out = []
@@ -499,7 +502,8 @@ class BiliClient:
                 {
                     "talker_id": int(session.get("talker_id") or 0),
                     "unread": int(session.get("unread_count") or 0),
-                    "timestamp": int(session.get("timestamp") or 0),
+                    # session_ts 是微秒
+                    "timestamp": int((session.get("session_ts") or 0) // 1000000),
                     "last_text": _as_text(session.get("last_msg")),
                 }
             )
@@ -507,11 +511,12 @@ class BiliClient:
 
     def dm_messages(self, talker_id: int, size: int = 20) -> list[dict]:
         data = self._request(
-            f"{VC_API}/svr_sync/v1/svr-sync/msgfeed",
+            f"{VC_API}/svr_sync/v1/svr_sync/fetch_session_msgs",
             params={
                 "talker_id": talker_id,
                 "session_type": 1,
                 "size": size,
+                "sender_device_id": 1,
                 "build": 0,
                 "mobi_app": "web",
             },
@@ -535,10 +540,12 @@ class BiliClient:
                     "from": int(msg.get("sender_uid") or 0),
                     "ts": int(msg.get("timestamp") or 0),
                     "type": int(msg.get("msg_type") or 1),
+                    # msg_source：5/6/12/13/16/17/18 是系统推送或自动回复，不是人说的
+                    "source": int(msg.get("msg_source") or 0),
                     "text": text.strip(),
                 }
             )
-        out.sort(key=lambda item: item["ts"])
+        out.sort(key=lambda item: item["ts"])  # 接口按时间倒序，这里正过来
         return out
 
     # ---------------------------------------------------------------- 写
@@ -580,46 +587,48 @@ class BiliClient:
         )
         return True
 
-    # ---------------------------------------------------------------- 私信（beta）
+    # ---------------------------------------------------------------- 私信
 
-    def _dev_id(self, variant: int = 0) -> str:
-        """私信接口要 dev_id。B站 前端是从 buvid3 的 md5 派生的，这里是常见实现；
-        不同版本可能对不上，所以调用方会依次试两种拼法。"""
-        seed = self.buvid3 or self.sessdata or "feiyu"
-        digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
-        if variant == 1:
-            digest = digest.translate(str.maketrans("0123456789", "ABCDEFGHIJ"))
-        return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
+    def _dev_id(self) -> str:
+        """图片/私信接口要的 dev_id 就是一个 UUID v4，跟 buvid3 无关。"""
+        return str(uuid.uuid4()).upper()
 
-    def send_dm(self, receiver_uid: int | str, text: str) -> dict:
-        """给小号/主号发私信。这是 beta：接口签名随版本变，失败别惊讶。"""
+    def send_dm(self, receiver_uid: int | str, text: str, dev_id: str = "") -> dict:
+        """发私信。
+
+        实测要点（2026-10）：URL 上要带 wbi 签名参数 w_sender_uid / w_receiver_id /
+        w_dev_id / w_rid / wts，正文里再带一份 msg[...]，两边缺一不可。
+        """
         if not (self.jct and self.sessdata):
             raise BiliError(-101, "没配 Cookie")
         if not self.uid:
             raise BiliError(-101, "缺 DedeUserID，不知道发件人是谁")
-        last: BiliError | None = None
-        for variant in (0, 1):
-            form = {
-                "msg[sender_uid]": self.uid,
-                "msg[receiver_id]": str(receiver_uid),
-                "msg[receiver_type]": 1,
-                "msg[msg_type]": 1,
-                "msg[dev_id]": self._dev_id(variant),
-                "msg[timestamp]": int(time.time()),
-                "msg[content]": json.dumps({"content": text}, ensure_ascii=False),
-                "csrf": self.jct,
-                "csrf_token": self.jct,
-            }
-            try:
-                data = self._request(
-                    f"{VC_API}/web_im/v1/web_im/send_msg",
-                    form=form,
-                    referer="https://message.bilibili.com/",
-                )
-                return {"ok": True, "variant": variant, "raw": data}
-            except BiliError as exc:
-                last = exc
-                if not exc.is_login_error and exc.code not in (-400, 21000):
-                    raise
-                continue
-        raise last or BiliError(-1, "私信发送失败")
+
+        dev = dev_id or self._dev_id()
+        form = {
+            "msg[sender_uid]": self.uid,
+            "msg[receiver_id]": str(receiver_uid),
+            "msg[receiver_type]": 1,
+            "msg[msg_type]": 1,
+            "msg[msg_status]": 0,
+            "msg[dev_id]": dev,
+            "msg[timestamp]": int(time.time()),
+            "msg[new_face_version]": 1,
+            "msg[content]": json.dumps({"content": text}, ensure_ascii=False),
+            "csrf": self.jct,
+            "csrf_token": self.jct,
+            "build": 0,
+            "mobi_app": "web",
+        }
+        data = self._request(
+            f"{VC_API}/web_im/v1/web_im/send_msg",
+            params={
+                "w_sender_uid": self.uid,
+                "w_receiver_id": str(receiver_uid),
+                "w_dev_id": dev,
+            },
+            form=form,
+            use_wbi=True,
+            referer="https://message.bilibili.com/",
+        )
+        return {"ok": True, "msg_key": (data or {}).get("msg_key"), "dev_id": dev}
