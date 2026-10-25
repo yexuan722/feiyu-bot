@@ -299,7 +299,7 @@ def cmd_discover(args) -> int:
 
 def cmd_dm(args) -> int:
     cfg, store, client = build(args)
-    result = dm_mod.run_once(store, client, cfg)
+    result = dm_mod.run_once(store, client, cfg, explain=getattr(args, "explain", False))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if not result["errors"] else 1
 
@@ -787,7 +787,8 @@ def main() -> int:
     sub.add_parser("daemon", parents=[GLOBAL], help="看后台常驻状态")
     sub.add_parser("check", parents=[GLOBAL], help="体检")
     sub.add_parser("poll", parents=[GLOBAL], help="手动扫一遍消息")
-    sub.add_parser("dm", parents=[GLOBAL], help="手动扫一遍私信")
+    dm_parser = sub.add_parser("dm", parents=[GLOBAL], help="手动扫一遍私信")
+    dm_parser.add_argument("--explain", action="store_true", help="打印每个会话为什么回/不回")
     sub.add_parser("discover", parents=[GLOBAL], help="手动跑一轮推荐")
     sub.add_parser("dump", parents=[GLOBAL], help="把原始消息导出到 debug/")
     sub.add_parser("dm-dump", parents=[GLOBAL], help="把原始私信导出到 debug/")

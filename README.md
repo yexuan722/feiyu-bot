@@ -237,7 +237,17 @@ python feiyu_bot.py install --task
 
 - 只看「最后一句是对方说的」会话，回完就不追
 - **跳过系统消息**（互相关注提示、活动通知、自动回复），只接真人发的（`msg_source` 0/1/2/3/4/7）
+- **不看 `unread_count`**。你在网页或手机上看一眼，未读数就归零了，但消息其实还没回。
+  改用「会话时间游标」：`meta` 表里存每个会话上次扫到的时间戳（`dm_ts_<uid>`），时间往后走了才重新拉消息。
 - 白名单/黑名单用 `allowed_uids` / `blocked_uids`
+
+排查为什么某条私信没被回：
+
+```powershell
+python feiyu_bot.py dm --explain
+```
+
+会逐个会话打印「只有系统消息，跳过」/「最后一句是我发的，跳过」/「已经生成过草稿，跳过」。
 
 ### 接口实况（2026-10 实测）
 
@@ -379,6 +389,7 @@ python feiyu_bot.py mode               # 看现在是什么模式
 | 回复跑到视频底下 | 目标 rpid 没取到，`parent=0` | 已修：rpid 现在从 `source_id` 取；实在没有会拦下来不让发 |
 | 私信字段对不上 | 接口改版 | `python feiyu_bot.py dm-dump` 看原始返回 |
 | 有些视频没有 tag | 以前推荐流的视频没解析出 `aid`，tag 接口查不了 | 已修（按 `bvid` 反查 aid）；老数据跑 `python feiyu_bot.py tags --fix` 补 |
+| 私信扫到了却不回 | 以前拿 `unread_count` 当触发条件，你看一眼就清零 | 已修：改用会话时间游标；用 `dm --explain` 看判定 |
 
 `dump` / `dm-dump` 是排障神器：把原始 JSON 落盘，字段改名了一眼就能看出来。
 

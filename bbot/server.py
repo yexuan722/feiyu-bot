@@ -145,11 +145,19 @@ class Runtime:
 
     def poll(self) -> dict:
         log("· 扫一遍 @ 和回复")
-        return interact.run_once(self.store, self.client, self.cfg)
+        result = interact.run_once(self.store, self.client, self.cfg)
+        for message in result.get("errors", []):
+            log(f"  ! {message}")
+        return result
 
     def poll_dm(self) -> dict:
         log("· 扫一遍私信")
-        return dm.run_once(self.store, self.client, self.cfg)
+        result = dm.run_once(self.store, self.client, self.cfg)
+        for message in result.get("errors", []):
+            log(f"  ! 私信：{message}")
+        if result.get("new"):
+            log(f"  · 私信：新 {result['new']} 条，自动回 {result['sent']} 条")
+        return result
 
     def discover(self) -> dict:
         log("· 去首页捞视频")

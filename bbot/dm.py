@@ -16,7 +16,8 @@ from .store import Store, draft_key
 HUMAN_SOURCES = {0, 1, 2, 3, 4, 7}
 
 
-def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -> dict:
+def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False,
+             explain: bool = False) -> dict:
     result = {"sessions": 0, "new": 0, "sent": 0, "errors": []}
     dm_cfg = cfg.get("dm", {})
     if not dm_cfg.get("enabled", True):
@@ -45,7 +46,15 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
             continue
         if allowed and talker not in allowed:
             continue
-        if int(session.get("unread") or 0) <= 0:
+
+        # 不能靠 unread_count 判断「有没有新消息」：你自己在网页或 APP 里
+        # 点开看一眼，未读数就归零了，但对方那条其实还没回。
+        # 改成看会话时间有没有往后走。
+        session_ts = int(session.get("timestamp") or 0)
+        last_scan = float(store.get_meta(f"dm_ts_{talker}", "0") or 0)
+        if session_ts and session_ts <= last_scan:
+            if explain:
+                log(f"  · {talker}: 会话没更新，跳过")
             continue
 
         try:
@@ -53,11 +62,15 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
         except BiliError as exc:
             result["errors"].append(f"拉会话消息失败 [{exc.code}] {exc.message}")
             continue
+        # 游标往前走，避免每轮都重复拉同一个会话
+        store.set_meta(f"dm_ts_{talker}", str(session_ts))
         if not messages:
             continue
 
         # 最后一句是我说的 → 已经回过了，别追着人唠
         if messages[-1]["from"] == my_uid:
+            if explain:
+                log(f"  · {talker}: 最后一句是我发的，跳过")
             continue
 
         # 跳过系统推送/自动回复（互相关注提示、活动通知之类），别对着机器说话
@@ -69,11 +82,15 @@ def run_once(store: Store, client: BiliClient, cfg: dict, quiet: bool = False) -
             and m.get("source", 0) in HUMAN_SOURCES
         ]
         if not theirs:
+            if explain:
+                log(f"  · {talker}: 只有系统消息，跳过")
             continue
         last = theirs[-1]
 
         key = draft_key("dm", talker, last["key"], last["text"])
         if store.has_draft(key):
+            if explain:
+                log(f"  · {talker}: 这条已经生成过草稿，跳过")
             continue
 
         body = ""
