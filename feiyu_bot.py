@@ -155,10 +155,12 @@ def cmd_setup(args) -> int:
         if api_key is None:
             api_key = _ask("  API Key（回车跳过）")
 
-        if api_key:
+        # 本地跑的模型（Ollama）不用 key，别因为「没填 key」把配置吞了
+        is_local = any(host in base_url for host in ("127.0.0.1", "localhost", "0.0.0.0"))
+        if api_key or is_local:
             cfg["llm"]["base_url"] = base_url
             cfg["llm"]["model"] = model
-            cfg["llm"]["api_key"] = api_key
+            cfg["llm"]["api_key"] = api_key or ""
             config_mod.save_config(cfg, target)
             print(f"\n✓ 已写入模型配置：{model} @ {base_url}")
             try:
@@ -172,7 +174,10 @@ def cmd_setup(args) -> int:
                 print(f"✓ 模型通了（{time.time() - started:.1f}s）：{answer.strip()[:30]}")
             except llm.LLMError as exc:
                 print(f"× 模型调用失败：{exc}")
-                print("  key 对不对、有没有额度、base_url 是不是少了 /v1")
+                if is_local:
+                    print("  Ollama 跑起来了吗？先 ollama serve，再 ollama pull " + model)
+                else:
+                    print("  key 对不对、有没有额度、base_url 是不是少了 /v1")
         else:
             print("· 没填 key，模型先空着")
 
