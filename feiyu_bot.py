@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """大肥鱼小号 bot —— 命令行入口。
 
+    python feiyu_bot.py setup     向导：填 Cookie 和模型（推荐第一次用这个）
     python feiyu_bot.py up        起后台（网页 + 自动扫消息/捞视频）
     python feiyu_bot.py serve     只起网页，不自动干活
     python feiyu_bot.py check     体检：Cookie / 模型 / wbi 签名
@@ -49,6 +50,140 @@ def build(args) -> tuple[dict, Store, BiliClient]:
 
 
 # --------------------------------------------------------------------- 命令
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    """带默认值的交互输入；管道/非交互环境下拿不到输入就返回默认值。"""
+    hint = f"（默认 {default}）" if default else ""
+    try:
+        raw = input(f"{prompt}{hint}：").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    return raw or default
+
+
+def parse_cookie(raw: str) -> dict:
+    """把一整条 Cookie 字符串拆成字典。
+
+    能吃的输入：
+    - `SESSDATA=xxx; bili_jct=yyy; buvid3=zzz`
+    - `Cookie: SESSDATA=xxx; ...`
+    - DevTools 里复制的 `a=b&c=d`
+    - 换行分隔的四行
+    """
+    text = (raw or "").strip()
+    if text.lower().startswith("cookie:"):
+        text = text[7:]
+    text = text.replace("\r", "").replace("\n", ";").replace("&", ";")
+    out: dict[str, str] = {}
+    for part in text.split(";"):
+        part = part.strip().strip(",")
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip().strip('"').strip("'").strip()
+        if key and value:
+            out[key] = value
+    return out
+
+
+def cmd_setup(args) -> int:
+    """一步一步把 Cookie 和模型填进 config.json，填完顺手验一次。"""
+    print("=" * 60)
+    print("接入向导：B站 账号 + AI 模型")
+    print("=" * 60)
+
+    cfg = config_mod.load_config(args.config)
+    target = Path(args.config) if args.config else config_mod.CONFIG_PATH
+    login_ok = False
+
+    # ---------------------------------------------------------- 1. Cookie
+    print("\n【第 1 步】B站 小号的 Cookie\n")
+    if not args.cookie:
+        print("  1. 浏览器里用【小号】登录 bilibili.com（别用无痕窗口）")
+        print("  2. F12 开发者工具 → Application(应用) → 左侧 Cookies → https://www.bilibili.com")
+        print("  3. 找到这四个：SESSDATA / bili_jct / buvid3 / DedeUserID")
+        print("  4. 懒人法：F12 → Network → 点任意一个请求 → Request Headers 里整条 Cookie 复制")
+        print()
+
+    raw = args.cookie or _ask("把整条 Cookie 粘这里（直接回车跳过）")
+    cookies = parse_cookie(raw)
+    for field in ("sessdata", "bili_jct", "buvid3", "dedeuserid"):
+        if cookies.get(field):
+            cfg["bili"][field] = cookies[field]
+
+    if not cfg["bili"].get("sessdata"):
+        cfg["bili"]["sessdata"] = _ask("  没识别到 SESSDATA，手动贴一个（回车跳过）")
+    if not cfg["bili"].get("bili_jct"):
+        cfg["bili"]["bili_jct"] = _ask("  没识别到 bili_jct，手动贴一个（回车跳过）")
+
+    if not cfg["bili"].get("sessdata"):
+        print("\n× 没有 SESSDATA，这一步跳过（没有 Cookie 就发不了评论，只能看投喂）")
+    else:
+        config_mod.save_config(cfg, target)
+        print(f"\n✓ 已写入 {target}")
+        print(f"  SESSDATA {config_mod.masked(cfg['bili']['sessdata'])}")
+
+        client = BiliClient(cfg)
+        me = client.me(refresh=True)
+        if me.get("is_login"):
+            login_ok = True
+            print(f"✓ 登录成功：{me.get('uname')}（UID {me.get('mid')}）")
+            if not cfg["bili"].get("dedeuserid"):
+                cfg["bili"]["dedeuserid"] = str(me.get("mid") or "")
+                config_mod.save_config(cfg, target)
+        else:
+            print(f"× 登录失败：{me.get('reason')}")
+            print("  常见原因：SESSDATA 少抄了尾巴 / 已过期 / 抄的是别的浏览器的")
+
+    # ---------------------------------------------------------- 2. 模型
+    if args.no_llm:
+        print("\n· 跳过模型配置")
+    else:
+        print("\n【第 2 步】接模型（随便一个 OpenAI 兼容接口）")
+        print("  DeepSeek 官方：base_url=https://api.deepseek.com/v1  model=deepseek-chat")
+        print("  本地 Ollama  ：base_url=http://127.0.0.1:11434/v1  model=qwen2.5:7b")
+        print("  不想接就空着回车——@ 消息照样排队，你自己写正文就行\n")
+
+        base_url = args.base_url or _ask(
+            "  base_url", cfg["llm"].get("base_url") or "https://api.deepseek.com/v1"
+        )
+        model = args.model or _ask("  模型名", cfg["llm"].get("model") or "deepseek-chat")
+        api_key = args.api_key
+        if api_key is None:
+            api_key = _ask("  API Key（回车跳过）")
+
+        if api_key:
+            cfg["llm"]["base_url"] = base_url
+            cfg["llm"]["model"] = model
+            cfg["llm"]["api_key"] = api_key
+            config_mod.save_config(cfg, target)
+            print(f"\n✓ 已写入模型配置：{model} @ {base_url}")
+            try:
+                started = time.time()
+                answer = llm.chat(
+                    cfg,
+                    [{"role": "user", "content": "回两个字：收到"}],
+                    temperature=0.2,
+                    max_tokens=20,
+                )
+                print(f"✓ 模型通了（{time.time() - started:.1f}s）：{answer.strip()[:30]}")
+            except llm.LLMError as exc:
+                print(f"× 模型调用失败：{exc}")
+                print("  key 对不对、有没有额度、base_url 是不是少了 /v1")
+        else:
+            print("· 没填 key，模型先空着")
+
+    # ---------------------------------------------------------- 3. 收尾
+    print("\n" + "=" * 60)
+    print("下一步")
+    print("=" * 60)
+    print("  python feiyu_bot.py check    # 体检，全绿就能开工")
+    print("  python feiyu_bot.py up       # 起锅，浏览器会自动打开驾驶舱")
+    print("\n提醒：config.json 里是你的账号凭证，别截图别外传；它已经在 .gitignore 里了。")
+    return 0 if login_ok else 1
 
 
 def cmd_check(args) -> int:
@@ -300,6 +435,13 @@ def main() -> int:
     sub.add_parser("dump", parents=[GLOBAL], help="把原始消息导出到 debug/")
     sub.add_parser("demo", parents=[GLOBAL], help="用假数据预览界面")
 
+    setup_parser = sub.add_parser("setup", parents=[GLOBAL], help="向导：填 Cookie 和模型")
+    setup_parser.add_argument("--cookie", default="", help="整条 Cookie 字符串（可省，交互输入）")
+    setup_parser.add_argument("--base-url", default="", help="模型接口地址")
+    setup_parser.add_argument("--model", default="", help="模型名")
+    setup_parser.add_argument("--api-key", default=None, help="模型 API Key")
+    setup_parser.add_argument("--no-llm", action="store_true", help="只配 Cookie，不碰模型")
+
     list_parser = sub.add_parser("list", parents=[GLOBAL], help="看队列")
     list_parser.add_argument("--status", default="pending",
                              choices=["pending", "sent", "skipped", "failed", "all"])
@@ -329,6 +471,7 @@ def main() -> int:
         args.status = None
 
     handlers = {
+        "setup": cmd_setup,
         "check": cmd_check,
         "poll": cmd_poll,
         "discover": cmd_discover,

@@ -43,7 +43,31 @@ python feiyu_bot.py demo
 
 ---
 
-## 正式接上（四步）
+## 最快路径：接入向导
+
+```powershell
+python feiyu_bot.py setup
+```
+
+它只问两件事，填完当场验：
+
+1. **整条 Cookie**：F12 → Network → 点任意请求 → Request Headers 里的 `Cookie:` 整行复制过来。
+   向导会自己拆出 `SESSDATA / bili_jct / buvid3 / DedeUserID`，不用你一个个抄。
+2. **模型**：`base_url` / `model` / `api_key`，回车跳过也行（那就只排队、不生成）。
+
+不想交互，一条命令塞完也行：
+
+```powershell
+python feiyu_bot.py setup `
+  --cookie "SESSDATA=xxx; bili_jct=yyy; buvid3=zzz; DedeUserID=123" `
+  --api-key "sk-xxxx"
+```
+
+看到 `✓ 登录成功：你的昵称` + `✓ 模型通了` 就算接好了。
+
+---
+
+## 手动接（想自己填配置）
 
 ### 1. 建配置
 
