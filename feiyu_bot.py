@@ -380,11 +380,11 @@ def _run_task_cmd(argv: list[str]) -> tuple[int, str]:
 
 
 def _task_command() -> str:
-    """用 pythonw 起，才不会弹出一个黑窗口。"""
+    """开机自启指向看门狗，看门狗再管 bot——bot 崩了也能被拉起来。"""
     python_exe = Path(sys.executable)
     pythonw = python_exe.with_name("pythonw.exe")
     exe = pythonw if pythonw.exists() else python_exe
-    return f'"{exe}" "{HERE / "feiyu_bot.py"}" up --no-browser'
+    return f'"{exe}" "{HERE / "feiyu_bot.py"}" watchdog'
 
 
 def _install_run_key(command: str) -> bool:
@@ -513,18 +513,37 @@ def cmd_daemon(args) -> int:
     code, out = _run_task_cmd(["/Query", "/TN", TASK_NAME])
     print("  " + ("✓ 计划任务：已装" if code == 0 else "· 计划任务：没装（要管理员才能装）"))
 
-    print(f"\n  日志文件：{logbook.log_path()}")
-    print(f"  面板地址：http://{args.host}:{args.port}")
-    print("\n  正在运行的 pythonw / python 进程：")
+    from bbot import watchdog as wd
+
+    if wd.STOP_FLAG.exists():
+        print("  ⏸ 已暂停（data/stop.flag 存在），看门狗不会拉 bot")
+    wd_pid = ""
     try:
-        proc = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq pythonw.exe", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, encoding="gbk", errors="replace",
-        )
-        lines = [ln for ln in (proc.stdout or "").splitlines() if "pythonw" in ln]
-        print("    " + ("\n    ".join(lines) if lines else "（没有 pythonw 在跑）"))
+        wd_pid = wd.PID_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         pass
+    wd_alive = bool(wd_pid.isdigit() and wd._pid_alive(int(wd_pid)))
+    print(f"  {'✓' if wd_alive else '·'} 看门狗：{'PID ' + wd_pid if wd_alive else '没在跑'}")
+
+    cfg = config_mod.load_config(args.config)
+    port = int(cfg.get("server", {}).get("port", 8765))
+    print(f"  {'✓' if wd.api_ok(port) else '×'} 面板：http://{args.host}:{port or 8765}"
+          + ("" if wd.api_ok(port) else "（没响应）"))
+
+    print(f"\n  日志：{logbook.LOG_DIR}")
+    print("\n  进程：")
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe' OR Name='python.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*feiyu_bot.py*' } | "
+             "Select-Object ProcessId,CommandLine | Format-Table -AutoSize | Out-String -Width 120"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=25,
+        )
+        out = (proc.stdout or "").strip()
+        print("    " + (out.replace("\n", "\n    ") if out else "（没有相关进程）"))
+    except (OSError, subprocess.SubprocessError):
+        print("    （查不到）")
     return 0
 
 
@@ -571,6 +590,49 @@ def cmd_mode(args) -> int:
     config_mod.save_config(cfg, args.config)
     print("✓ 已写入 config.json（后台没在跑，下次启动生效）")
     return 0
+
+
+def cmd_watchdog(args) -> int:
+    """前台跑看门狗；平时由开机自启拉起来，不用手动开。"""
+    from bbot import watchdog as wd
+
+    cfg = config_mod.load_config(args.config)
+    interval = int(args.interval or cfg.get("watchdog", {}).get("interval_seconds", 180))
+    return wd.run(interval)
+
+
+def cmd_pause(args) -> int:
+    """暂停：停 bot，并且让看门狗别再把它拉起来。"""
+    from bbot import watchdog as wd
+
+    wd.STOP_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    wd.STOP_FLAG.write_text("paused", encoding="utf-8")
+    pids = wd.bot_pids()
+    for pid in pids:
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+    print(f"✓ 已暂停{'（结束 ' + str(len(pids)) + ' 个进程）' if pids else ''}")
+    print(f"  看门狗不会再来拉；恢复：python feiyu_bot.py resume")
+    return 0
+
+
+def cmd_resume(args) -> int:
+    from bbot import watchdog as wd
+
+    if wd.STOP_FLAG.exists():
+        wd.STOP_FLAG.unlink()
+        print("✓ 暂停标记已清除")
+    cfg = config_mod.load_config(args.config)
+    port = int(cfg.get("server", {}).get("port", 8765))
+    if wd.api_ok(port):
+        print(f"· bot 已经在跑（http://127.0.0.1:{port}），不用重复启动")
+        return 0
+    if wd.start_bot():
+        print("✓ 已拉起 bot，5 秒后看面板")
+        time.sleep(5)
+        print("  状态：" + ("正常" if wd.api_ok(port) else "还没起来，看 data/logs/"))
+        return 0
+    print("× 拉起失败，看 data/logs/ 里的日志")
+    return 1
 
 
 def cmd_list(args) -> int:
@@ -822,6 +884,11 @@ def main() -> int:
     mode_parser.add_argument("--dm-auto", action="store_true", help="私信改自动回")
     mode_parser.add_argument("--dm-manual", action="store_true", help="私信改回手动审")
 
+    wd_parser = sub.add_parser("watchdog", parents=[GLOBAL], help="看门狗：挂了自动重启 bot")
+    wd_parser.add_argument("--interval", type=int, default=0, help="检查间隔秒数（默认取配置 180）")
+    sub.add_parser("pause", parents=[GLOBAL], help="暂停：停 bot 并让看门狗别管")
+    sub.add_parser("resume", parents=[GLOBAL], help="恢复：放开暂停并拉起 bot")
+
     args = parser.parse_args()
     args.config = getattr(args, "config", None)
     args.db = getattr(args, "db", None)
@@ -845,6 +912,9 @@ def main() -> int:
     handlers = {
         "setup": cmd_setup,
         "mode": cmd_mode,
+        "watchdog": cmd_watchdog,
+        "pause": cmd_pause,
+        "resume": cmd_resume,
         "install": cmd_install,
         "uninstall": cmd_uninstall,
         "daemon": cmd_daemon,

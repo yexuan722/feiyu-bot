@@ -107,6 +107,10 @@ DEFAULTS: dict = {
         "webhook_enabled": False,
     },
     "server": {"host": "127.0.0.1", "port": 8765},
+    "watchdog": {
+        # 多久检查一次（秒）。太短白耗电，太长死了没人管。
+        "interval_seconds": 180,
+    },
     "persona_file": "bbot/persona.md",
 }
 

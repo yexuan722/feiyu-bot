@@ -171,10 +171,49 @@ python feiyu_bot.py install
 
 它会在当前用户的启动项里写一条（`HKCU\...\Run`，**不需要管理员**），下次登录 Windows 就用 `pythonw` 静默启动，没有黑窗口。
 
+**注意：自启指向的是看门狗，不是 bot。** 看门狗再负责 bot：
+
+```
+Windows 登录 → pythonw feiyu_bot.py watchdog → （发现 bot 不在）→ pythonw feiyu_bot.py up
+```
+
+所以 bot 崩了、被误杀、端口没抢到，都会被看门狗拉回来。
+
 ```powershell
-python feiyu_bot.py daemon      # 看装没装、进程在不在、日志在哪
+python feiyu_bot.py daemon      # 看门狗在不在、bot 在不在、面板通不通、日志在哪
+python feiyu_bot.py pause       # 暂停：停 bot，并且让看门狗别管
+python feiyu_bot.py resume      # 恢复：清标记 + 拉起 bot
 python feiyu_bot.py uninstall   # 卸掉自启（正在跑的进程不会停）
 ```
+
+### 看门狗
+
+```json
+"watchdog": { "interval_seconds": 180 }
+```
+
+**每 3 分钟**检查一次 `http://127.0.0.1:8765/api/health`：
+
+| 情况 | 动作 |
+|---|---|
+| 接口正常 | 什么都不做 |
+| 接口不通、但进程在 | 记一行日志，等下一轮（不重启，免得双开抢端口） |
+| 进程没了 | 拉起来，20 秒后复查一次 |
+| 端口被别的程序占着 | 不动手，记日志 |
+| `data/stop.flag` 存在 | 跳过（`pause` 写的） |
+
+日志 `data/logs/watchdog-YYYY-MM-DD.log`。真实恢复长这样：
+
+```
+[20:41:36] 看门狗上线：每 180 秒检查一次，端口 8765
+[20:44:00] bot 不在了，重新拉起
+[20:44:00] 已重新拉起，等 20 秒再看
+[20:44:20] 复查：正常
+```
+
+> ⚠️ 一个 Windows 上的坑：探测进程存活不能用 `os.kill(pid, 0)`。
+> 在 Windows 上它等价于 `TerminateProcess`，是**去杀进程**不是探活。
+> 这里用的是 `ctypes` 调 `OpenProcess` + `GetExitCodeProcess` 判断 `STILL_ACTIVE`。
 
 需要更正式的托管（开机即启、不依赖登录）用计划任务，**要管理员**：
 
@@ -182,11 +221,11 @@ python feiyu_bot.py uninstall   # 卸掉自启（正在跑的进程不会停）
 python feiyu_bot.py install --task
 ```
 
-**两个坑**：
+**三个坑**：
 
 1. **电脑睡眠/休眠 = 进程挂起**，醒来才会继续。要 24 小时跑，把电源选项改成「从不睡眠」（至少插电时）。
 2. 后台跑没有终端输出，看日志：`data/logs/feiyu-YYYY-MM-DD.log`（每天一个文件）。
-3. 后台跑起来之后，面板还是那个地址，浏览器随时打开看。
+3. **从别的程序里 `Start-Process` 起的 bot，会随父程序一起被杀**（比如从 DSH 里启动，DSH 一关 bot 就没了）。要么走开机自启，要么用 `pause/resume`，要么用 WMI 创建进程。
 
 如果不想装自启，也可以就开着终端跑 —— 只要那个窗口别关。
 
@@ -400,7 +439,10 @@ python feiyu_bot.py mode               # 看现在是什么模式
 ```powershell
 python feiyu_bot.py up          # 起锅（网页 + 后台）
 python feiyu_bot.py install     # 装成开机自启（--task 用计划任务，要管理员）
-python feiyu_bot.py daemon      # 看后台常驻状态
+python feiyu_bot.py watchdog    # 前台跑看门狗（--interval 秒）
+python feiyu_bot.py pause       # 暂停：停 bot，看门狗也别管
+python feiyu_bot.py resume      # 恢复
+python feiyu_bot.py daemon      # 看看门狗/bot/面板/日志状态
 python feiyu_bot.py uninstall   # 卸掉自启
 python feiyu_bot.py check       # 体检
 python feiyu_bot.py poll        # 手动扫 @ / 回复
